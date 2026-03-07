@@ -5,5 +5,5 @@
 [![Go](https://github.com/soypat/lefevre/actions/workflows/go.yml/badge.svg)](https://github.com/soypat/lefevre/actions/workflows/go.yml)
 [![sourcegraph](https://sourcegraph.com/github.com/soypat/lefevre/-/badge.svg)](https://sourcegraph.com/github.com/soypat/lefevre?badge)
 
-This is the Go rewrite of kb_text_shape (v2.14, by Jimmy Lefevre), a 28K-line single-header C library for Unicode text segmentation and OpenType shaping.
+This is a Go rewrite of [kb_text_shape.h](https://github.com/JimmyLefevre/kb) (v2.14, by Jimmy Lefevre), a 28K-line single-header C library for Unicode text segmentation and OpenType shaping.
 

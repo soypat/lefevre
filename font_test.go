@@ -290,6 +290,127 @@ func TestFontGSUBLigaLookupCount(t *testing.T) {
 	}
 }
 
+// GDEF table tests
+
+func TestFontHasGDEFTable(t *testing.T) {
+	f := loadTestFont(t)
+	te := f.tables[tableGdef]
+	if te.length == 0 {
+		t.Fatal("GDEF table not found in DejaVuSans.ttf")
+	}
+}
+
+func TestFontGDEFGlyphClassBase(t *testing.T) {
+	f := loadTestFont(t)
+	// 'A' is a base glyph in any font with a GDEF table.
+	gid := f.GlyphID('A')
+	if gid == 0 {
+		t.Skip("no glyph for 'A'")
+	}
+	cls := f.glyphClassDef(gid)
+	if cls != glyphClassBase {
+		t.Errorf("glyphClassDef('A' gid=%d) = %d, want %d (base)", gid, cls, glyphClassBase)
+	}
+}
+
+func TestFontGDEFGlyphClassMark(t *testing.T) {
+	f := loadTestFont(t)
+	// U+0300 (combining grave accent) should be classified as a mark glyph.
+	gid := f.GlyphID(0x0300)
+	if gid == 0 {
+		t.Skip("no glyph for U+0300")
+	}
+	cls := f.glyphClassDef(gid)
+	if cls != glyphClassMark {
+		t.Errorf("glyphClassDef(U+0300 gid=%d) = %d, want %d (mark)", gid, cls, glyphClassMark)
+	}
+}
+
+func TestFontGDEFGlyphClassZeroValue(t *testing.T) {
+	var f Font
+	cls := f.glyphClassDef(42)
+	if cls != glyphClassZero {
+		t.Errorf("glyphClassDef on zero Font = %d, want 0", cls)
+	}
+}
+
+func TestFontGDEFMarkAttachmentClassZeroValue(t *testing.T) {
+	var f Font
+	mac := f.markAttachmentClass(42)
+	if mac != 0 {
+		t.Errorf("markAttachmentClass on zero Font = %d, want 0", mac)
+	}
+}
+
+func TestClassDefFormat1Lookup(t *testing.T) {
+	// Build a synthetic ClassDef format 1 table:
+	// format=1, startGlyphID=10, glyphCount=3, classes=[1, 3, 2]
+	data := []byte{
+		0, 1, // format 1
+		0, 10, // startGlyphID = 10
+		0, 3, // glyphCount = 3
+		0, 1, // glyph 10 -> class 1
+		0, 3, // glyph 11 -> class 3
+		0, 2, // glyph 12 -> class 2
+	}
+	tests := []struct {
+		gid  uint16
+		want uint16
+	}{
+		{9, 0},  // before range
+		{10, 1}, // first
+		{11, 3}, // middle
+		{12, 2}, // last
+		{13, 0}, // after range
+	}
+	for _, tt := range tests {
+		got := classDefLookup(data, 0, tt.gid)
+		if got != tt.want {
+			t.Errorf("classDefLookup(gid=%d) = %d, want %d", tt.gid, got, tt.want)
+		}
+	}
+}
+
+func TestClassDefFormat2Lookup(t *testing.T) {
+	// Build a synthetic ClassDef format 2 table:
+	// format=2, rangeCount=2
+	// range 0: startGlyph=5, endGlyph=8, class=1
+	// range 1: startGlyph=20, endGlyph=25, class=3
+	data := []byte{
+		0, 2, // format 2
+		0, 2, // rangeCount = 2
+		// range 0
+		0, 5, // startGlyph = 5
+		0, 8, // endGlyph = 8
+		0, 1, // class = 1
+		// range 1
+		0, 20, // startGlyph = 20
+		0, 25, // endGlyph = 25
+		0, 3, // class = 3
+	}
+	tests := []struct {
+		gid  uint16
+		want uint16
+	}{
+		{4, 0},  // before first range
+		{5, 1},  // start of range 0
+		{7, 1},  // middle of range 0
+		{8, 1},  // end of range 0
+		{9, 0},  // between ranges
+		{19, 0}, // just before range 1
+		{20, 3}, // start of range 1
+		{22, 3}, // middle of range 1
+		{25, 3}, // end of range 1
+		{26, 0}, // after last range
+	}
+	for _, tt := range tests {
+		got := classDefLookup(data, 0, tt.gid)
+		if got != tt.want {
+			t.Errorf("classDefLookup(gid=%d) = %d, want %d", tt.gid, got, tt.want)
+		}
+	}
+}
+
 func TestFontGSUBApplyLiga(t *testing.T) {
 	f := loadTestFont(t)
 	// "ffi" should produce a ligature in DejaVuSans.
@@ -305,4 +426,893 @@ func TestFontGSUBApplyLiga(t *testing.T) {
 	if len(result) == 0 {
 		t.Fatal("applyGSUBLigatures returned empty slice")
 	}
+}
+
+// GSUB type 1 (single substitution) tests
+
+func TestSingleSubstFormat1(t *testing.T) {
+	// Synthetic: coverage has glyph IDs 10 and 20. Delta = +5.
+	// Coverage format 1: [10, 20]
+	data := buildSingleSubstFormat1(t, []uint16{10, 20}, 5)
+	f := &Font{data: data}
+	f.cmapFormat = 0 // no cmap needed
+
+	glyphs := []Glyph{
+		{ID: 10}, {ID: 15}, {ID: 20}, {ID: 30},
+	}
+	result := f.applySingleSubst(glyphs, 0)
+	if result[0].ID != 15 {
+		t.Errorf("glyph 10 + delta 5 = %d, want 15", result[0].ID)
+	}
+	if result[1].ID != 15 {
+		t.Errorf("glyph 15 (not covered) = %d, want 15", result[1].ID)
+	}
+	if result[2].ID != 25 {
+		t.Errorf("glyph 20 + delta 5 = %d, want 25", result[2].ID)
+	}
+	if result[3].ID != 30 {
+		t.Errorf("glyph 30 (not covered) = %d, want 30", result[3].ID)
+	}
+	if !result[0].Flags.Has(GlyphFlagGeneratedByGSUB) {
+		t.Error("substituted glyph should have GeneratedByGSUB flag")
+	}
+	if result[1].Flags.Has(GlyphFlagGeneratedByGSUB) {
+		t.Error("non-substituted glyph should not have GeneratedByGSUB flag")
+	}
+}
+
+func TestSingleSubstFormat2(t *testing.T) {
+	// Synthetic: coverage has glyph IDs [10, 20].
+	// Substitute array: [100, 200].
+	data := buildSingleSubstFormat2(t, []uint16{10, 20}, []uint16{100, 200})
+	f := &Font{data: data}
+
+	glyphs := []Glyph{
+		{ID: 10}, {ID: 15}, {ID: 20},
+	}
+	result := f.applySingleSubst(glyphs, 0)
+	if result[0].ID != 100 {
+		t.Errorf("glyph 10 -> %d, want 100", result[0].ID)
+	}
+	if result[1].ID != 15 {
+		t.Errorf("glyph 15 (uncovered) -> %d, want 15", result[1].ID)
+	}
+	if result[2].ID != 200 {
+		t.Errorf("glyph 20 -> %d, want 200", result[2].ID)
+	}
+}
+
+// GSUB type 2 (multiple substitution) tests
+
+func TestMultipleSubst(t *testing.T) {
+	// Synthetic: coverage has glyph 10.
+	// Sequence for coverage index 0: [50, 51, 52] (1:3 replacement).
+	data := buildMultipleSubst(t, []uint16{10}, [][]uint16{{50, 51, 52}})
+	f := &Font{data: data}
+
+	glyphs := []Glyph{
+		{ID: 5}, {ID: 10}, {ID: 20},
+	}
+	result := f.applyMultipleSubst(glyphs, 0)
+	if len(result) != 5 {
+		t.Fatalf("expected 5 glyphs after 1:3 substitution, got %d", len(result))
+	}
+	wantIDs := []uint16{5, 50, 51, 52, 20}
+	for i, want := range wantIDs {
+		if result[i].ID != want {
+			t.Errorf("result[%d].ID = %d, want %d", i, result[i].ID, want)
+		}
+	}
+	if !result[1].Flags.Has(GlyphFlagFirstInMultiple) {
+		t.Error("first substitute should have FirstInMultiple flag")
+	}
+	if !result[2].Flags.Has(GlyphFlagMultipleSubstitution) {
+		t.Error("subsequent substitute should have MultipleSubstitution flag")
+	}
+}
+
+func TestMultipleSubstDeletion(t *testing.T) {
+	// Sequence count 0 = deletion.
+	data := buildMultipleSubst(t, []uint16{10}, [][]uint16{{}})
+	f := &Font{data: data}
+
+	glyphs := []Glyph{
+		{ID: 5}, {ID: 10}, {ID: 20},
+	}
+	result := f.applyMultipleSubst(glyphs, 0)
+	if len(result) != 2 {
+		t.Fatalf("expected 2 glyphs after deletion, got %d", len(result))
+	}
+	if result[0].ID != 5 || result[1].ID != 20 {
+		t.Errorf("expected [5, 20], got [%d, %d]", result[0].ID, result[1].ID)
+	}
+}
+
+// GSUB type 3 (alternate substitution) tests
+
+func TestAlternateSubst(t *testing.T) {
+	// Coverage has glyph 10. Alternates: [100, 200, 300].
+	data := buildAlternateSubst(t, []uint16{10}, [][]uint16{{100, 200, 300}})
+	f := &Font{data: data}
+
+	glyphs := []Glyph{{ID: 10}, {ID: 15}}
+
+	// altIndex=0 -> 100
+	result := f.applyAlternateSubst(append([]Glyph{}, glyphs...), 0, 0)
+	if result[0].ID != 100 {
+		t.Errorf("alt index 0: got %d, want 100", result[0].ID)
+	}
+	if result[1].ID != 15 {
+		t.Errorf("uncovered glyph changed: got %d, want 15", result[1].ID)
+	}
+
+	// altIndex=2 -> 300
+	result = f.applyAlternateSubst(append([]Glyph{}, glyphs...), 0, 2)
+	if result[0].ID != 300 {
+		t.Errorf("alt index 2: got %d, want 300", result[0].ID)
+	}
+
+	// altIndex out of range -> falls back to 0 -> 100
+	result = f.applyAlternateSubst(append([]Glyph{}, glyphs...), 0, 99)
+	if result[0].ID != 100 {
+		t.Errorf("alt index OOB: got %d, want 100", result[0].ID)
+	}
+}
+
+func TestGSUBFeaturesDisableOverride(t *testing.T) {
+	f := loadTestFont(t)
+	var cfg ShapeConfig
+	cfg.Font = f
+
+	// Shape "ffi" with default features (liga enabled) — should produce ligature.
+	runsDefault := cfg.ShapeSimple(nil, "ffi", DirectionLTR)
+	defaultGlyphs := 0
+	for _, r := range runsDefault {
+		defaultGlyphs += len(r.Glyphs)
+	}
+
+	// Shape "ffi" with liga disabled — should produce 3 individual glyphs.
+	cfg.Features = []FeatureOverride{{Tag: FeatureTagLiga, Value: 0}}
+	runsNoLiga := cfg.ShapeSimple(nil, "ffi", DirectionLTR)
+	noLigaGlyphs := 0
+	for _, r := range runsNoLiga {
+		noLigaGlyphs += len(r.Glyphs)
+	}
+
+	if noLigaGlyphs != 3 {
+		t.Errorf("with liga=0: expected 3 glyphs for \"ffi\", got %d", noLigaGlyphs)
+	}
+	if defaultGlyphs >= noLigaGlyphs {
+		t.Errorf("with default features: expected fewer glyphs (ligature), got %d vs %d", defaultGlyphs, noLigaGlyphs)
+	}
+}
+
+func TestRTLGlyphReordering(t *testing.T) {
+	f := loadTestFont(t)
+	var cfg ShapeConfig
+	cfg.Font = f
+
+	// Shape LTR text — glyphs should be in logical order.
+	ltrRuns := cfg.ShapeSimple(nil, "AB", DirectionLTR)
+	if len(ltrRuns) == 0 {
+		t.Fatal("no LTR runs")
+	}
+	if len(ltrRuns[0].Glyphs) < 2 {
+		t.Fatal("expected at least 2 glyphs")
+	}
+	// In LTR, glyph[0] should be 'A' and glyph[1] should be 'B'.
+	if ltrRuns[0].Glyphs[0].Codepoint != 'A' || ltrRuns[0].Glyphs[1].Codepoint != 'B' {
+		t.Errorf("LTR order unexpected: [0]=%c [1]=%c", ltrRuns[0].Glyphs[0].Codepoint, ltrRuns[0].Glyphs[1].Codepoint)
+	}
+
+	// Shape with explicit RTL breaks — glyphs should be reversed.
+	rtlBreaks := []Break{
+		{Position: 0, Flags: BreakFlagDirection | BreakFlagParagraphDirection, Direction: DirectionRTL, ParagraphDirection: DirectionRTL},
+	}
+	rtlRuns := cfg.Shape(nil, "AB", rtlBreaks)
+	if len(rtlRuns) == 0 {
+		t.Fatal("no RTL runs")
+	}
+	if len(rtlRuns[0].Glyphs) < 2 {
+		t.Fatal("expected at least 2 glyphs")
+	}
+	// In RTL, glyph[0] should be 'B' (rightmost visually) and glyph[1] should be 'A'.
+	if rtlRuns[0].Glyphs[0].Codepoint != 'B' || rtlRuns[0].Glyphs[1].Codepoint != 'A' {
+		t.Errorf("RTL order unexpected: [0]=%c [1]=%c, want B then A",
+			rtlRuns[0].Glyphs[0].Codepoint, rtlRuns[0].Glyphs[1].Codepoint)
+	}
+}
+
+func TestGPOSKerning(t *testing.T) {
+	f := loadTestFont(t)
+	// Check that GPOS table exists.
+	if f.tables[tableGpos].length == 0 {
+		t.Skip("test font has no GPOS table")
+	}
+
+	// Check if font has kern feature in GPOS.
+	var idxBuf [4]int
+	kernIndices := f.findGPOSFeatureIndices(idxBuf[:0], FeatureTagKern)
+	if len(kernIndices) == 0 {
+		t.Skip("test font has no GPOS kern feature")
+	}
+
+	// Shape a pair known to have kerning (e.g., "AV", "To", "Wa").
+	var cfg ShapeConfig
+	cfg.Font = f
+
+	// Shape with kerning (default).
+	runsKern := cfg.ShapeSimple(nil, "AV", DirectionLTR)
+	if len(runsKern) == 0 || len(runsKern[0].Glyphs) < 2 {
+		t.Fatal("expected at least 2 glyphs for \"AV\"")
+	}
+
+	// Shape with kerning disabled.
+	cfg.Features = []FeatureOverride{{Tag: FeatureTagKern, Value: 0}}
+	runsNoKern := cfg.ShapeSimple(nil, "AV", DirectionLTR)
+	if len(runsNoKern) == 0 || len(runsNoKern[0].Glyphs) < 2 {
+		t.Fatal("expected at least 2 glyphs for \"AV\" without kern")
+	}
+
+	// With kerning, the first glyph ('A') should have a different advance or offset.
+	kernA := runsKern[0].Glyphs[0]
+	noKernA := runsNoKern[0].Glyphs[0]
+
+	// Kerning typically modifies AdvanceX or OffsetX.
+	kernApplied := kernA.AdvanceX != noKernA.AdvanceX ||
+		kernA.OffsetX != noKernA.OffsetX
+	if !kernApplied {
+		t.Log("NOTE: kerning may not have been applied — AV may not be a kerning pair in this font")
+	}
+}
+
+func TestGPOSKerningDisabled(t *testing.T) {
+	f := loadTestFont(t)
+	if f.tables[tableGpos].length == 0 {
+		t.Skip("test font has no GPOS table")
+	}
+
+	glyphs := []Glyph{{ID: f.GlyphID('A')}, {ID: f.GlyphID('V')}}
+	origAdvance := make([]int32, len(glyphs))
+	for i := range glyphs {
+		glyphs[i].AdvanceX = f.glyphAdvance(glyphs[i].ID)
+		origAdvance[i] = glyphs[i].AdvanceX
+	}
+
+	// Apply with kern disabled — should not modify anything.
+	disabled := map[FeatureTag]bool{FeatureTagKern: true}
+	f.applyGPOSKerning(glyphs, disabled)
+
+	for i := range glyphs {
+		if glyphs[i].AdvanceX != origAdvance[i] {
+			t.Errorf("glyph[%d] advance changed despite kern disabled: %d -> %d",
+				i, origAdvance[i], glyphs[i].AdvanceX)
+		}
+	}
+}
+
+func TestValueRecordSize(t *testing.T) {
+	tests := []struct {
+		format uint16
+		want   int
+	}{
+		{0, 0},
+		{1, 1},                    // XPlacement only
+		{0x04, 1},                 // XAdvance only
+		{0x05, 2},                 // XPlacement + XAdvance
+		{0x0F, 4},                 // all 4 positioning fields
+		{0xFF, 8},                 // all 8 fields including devices
+	}
+	for _, tt := range tests {
+		got := valueRecordSize(tt.format)
+		if got != tt.want {
+			t.Errorf("valueRecordSize(0x%02X) = %d, want %d", tt.format, got, tt.want)
+		}
+	}
+}
+
+func TestGPOSSingleAdjust(t *testing.T) {
+	// Synthetic GPOS single adjustment format 1: XAdvance = -50 for covered glyphs.
+	cov := buildCoverageFormat1([]uint16{10, 20})
+	// Layout: u16 format=1, u16 coverageOffset, u16 valueFormat=0x04(XAdvance), s16 value=-50
+	var data []byte
+	v := u16be(1) // format
+	data = append(data, v[0], v[1])
+	covOff := 8 // format(2) + covOff(2) + valueFormat(2) + value(2)
+	v = u16be(uint16(covOff))
+	data = append(data, v[0], v[1])
+	v = u16be(0x04) // valueFormat = XAdvance
+	data = append(data, v[0], v[1])
+	neg50 := int16(-50)
+	v = u16be(uint16(neg50)) // XAdvance = -50
+	data = append(data, v[0], v[1])
+	data = append(data, cov...)
+
+	font := &Font{data: data}
+	glyphs := []Glyph{
+		{ID: 10, AdvanceX: 600},
+		{ID: 30, AdvanceX: 500},
+	}
+	font.applyGPOSSingleAdjust(glyphs, 0)
+
+	if glyphs[0].AdvanceX != 550 {
+		t.Errorf("glyph[0].AdvanceX = %d, want 550 (600 - 50)", glyphs[0].AdvanceX)
+	}
+	if glyphs[0].Flags&GlyphFlagUsedInGPOS == 0 {
+		t.Error("glyph[0] should have GlyphFlagUsedInGPOS")
+	}
+	if glyphs[1].AdvanceX != 500 {
+		t.Errorf("glyph[1].AdvanceX = %d, want 500 (untouched)", glyphs[1].AdvanceX)
+	}
+}
+
+func TestGPOSPairAdjustFormat1(t *testing.T) {
+	// Synthetic pair adjustment format 1: pair (10, 20) with XAdvance=-75 on first glyph.
+	cov := buildCoverageFormat1([]uint16{10})
+	// ValueFormat1 = 0x04 (XAdvance), ValueFormat2 = 0
+	// PairSet for glyph 10: 1 pair record: secondGlyph=20, XAdvance=-75
+	// PairSet layout: u16 count=1, u16 secondGlyph=20, s16 XAdvance=-75
+	var pairSet []byte
+	v := u16be(1) // count
+	pairSet = append(pairSet, v[0], v[1])
+	v = u16be(20) // secondGlyph
+	pairSet = append(pairSet, v[0], v[1])
+	neg75 := int16(-75)
+	v = u16be(uint16(neg75)) // XAdvance
+	pairSet = append(pairSet, v[0], v[1])
+
+	// Subtable layout: format(2) + covOff(2) + vf1(2) + vf2(2) + setCount(2) + setOffset(2) = 12
+	headerSize := 12
+	pairSetOff := headerSize
+	covOffVal := pairSetOff + len(pairSet)
+
+	var data []byte
+	v = u16be(1) // format
+	data = append(data, v[0], v[1])
+	v = u16be(uint16(covOffVal))
+	data = append(data, v[0], v[1])
+	v = u16be(0x04) // valueFormat1 = XAdvance
+	data = append(data, v[0], v[1])
+	v = u16be(0) // valueFormat2
+	data = append(data, v[0], v[1])
+	v = u16be(1) // setCount
+	data = append(data, v[0], v[1])
+	v = u16be(uint16(pairSetOff)) // offset to pair set
+	data = append(data, v[0], v[1])
+	data = append(data, pairSet...)
+	data = append(data, cov...)
+
+	font := &Font{data: data}
+	glyphs := []Glyph{
+		{ID: 10, AdvanceX: 600},
+		{ID: 20, AdvanceX: 500},
+		{ID: 30, AdvanceX: 400},
+	}
+	font.applyGPOSPairAdjust(glyphs, 0)
+
+	if glyphs[0].AdvanceX != 525 {
+		t.Errorf("glyph[0].AdvanceX = %d, want 525 (600 - 75)", glyphs[0].AdvanceX)
+	}
+	if glyphs[0].Flags&GlyphFlagUsedInGPOS == 0 {
+		t.Error("glyph[0] should have GlyphFlagUsedInGPOS")
+	}
+	// Second and third glyphs should be unchanged.
+	if glyphs[1].AdvanceX != 500 {
+		t.Errorf("glyph[1].AdvanceX = %d, want 500", glyphs[1].AdvanceX)
+	}
+	if glyphs[2].AdvanceX != 400 {
+		t.Errorf("glyph[2].AdvanceX = %d, want 400", glyphs[2].AdvanceX)
+	}
+}
+
+// Synthetic table builders for GSUB tests.
+
+func u16be(v uint16) [2]byte { return [2]byte{byte(v >> 8), byte(v)} }
+
+func buildCoverageFormat1(glyphIDs []uint16) []byte {
+	var b []byte
+	f := u16be(1) // format
+	b = append(b, f[0], f[1])
+	c := u16be(uint16(len(glyphIDs)))
+	b = append(b, c[0], c[1])
+	for _, gid := range glyphIDs {
+		v := u16be(gid)
+		b = append(b, v[0], v[1])
+	}
+	return b
+}
+
+func buildSingleSubstFormat1(t *testing.T, covGlyphs []uint16, delta int16) []byte {
+	t.Helper()
+	// Layout: u16 format=1, u16 coverageOffset, s16 deltaGlyphID, then coverage table
+	cov := buildCoverageFormat1(covGlyphs)
+	covOff := 6 // right after the 3 u16 fields
+	var b []byte
+	f := u16be(1)
+	b = append(b, f[0], f[1])
+	co := u16be(uint16(covOff))
+	b = append(b, co[0], co[1])
+	d := u16be(uint16(delta))
+	b = append(b, d[0], d[1])
+	b = append(b, cov...)
+	return b
+}
+
+func buildSingleSubstFormat2(t *testing.T, covGlyphs []uint16, substGlyphs []uint16) []byte {
+	t.Helper()
+	// Layout: u16 format=2, u16 coverageOffset, u16 glyphCount, u16[] substGlyphIDs, then coverage
+	headerSize := 6 + len(substGlyphs)*2
+	cov := buildCoverageFormat1(covGlyphs)
+	var b []byte
+	f := u16be(2)
+	b = append(b, f[0], f[1])
+	co := u16be(uint16(headerSize))
+	b = append(b, co[0], co[1])
+	gc := u16be(uint16(len(substGlyphs)))
+	b = append(b, gc[0], gc[1])
+	for _, gid := range substGlyphs {
+		v := u16be(gid)
+		b = append(b, v[0], v[1])
+	}
+	b = append(b, cov...)
+	return b
+}
+
+func buildMultipleSubst(t *testing.T, covGlyphs []uint16, sequences [][]uint16) []byte {
+	t.Helper()
+	// Layout: u16 format=1, u16 coverageOffset, u16 sequenceCount, u16[] sequenceOffsets,
+	//         then sequence tables, then coverage table.
+	seqCount := len(sequences)
+	// Sequence offsets are relative to start of subtable.
+	seqOffsetsStart := 6 + seqCount*2 // after header + offset array
+	var seqData []byte
+	seqOffsets := make([]int, seqCount)
+	for i, seq := range sequences {
+		seqOffsets[i] = seqOffsetsStart + len(seqData)
+		gc := u16be(uint16(len(seq)))
+		seqData = append(seqData, gc[0], gc[1])
+		for _, gid := range seq {
+			v := u16be(gid)
+			seqData = append(seqData, v[0], v[1])
+		}
+	}
+	covOff := seqOffsetsStart + len(seqData)
+	cov := buildCoverageFormat1(covGlyphs)
+
+	var b []byte
+	f := u16be(1)
+	b = append(b, f[0], f[1])
+	co := u16be(uint16(covOff))
+	b = append(b, co[0], co[1])
+	sc := u16be(uint16(seqCount))
+	b = append(b, sc[0], sc[1])
+	for _, off := range seqOffsets {
+		v := u16be(uint16(off))
+		b = append(b, v[0], v[1])
+	}
+	b = append(b, seqData...)
+	b = append(b, cov...)
+	return b
+}
+
+func TestExtensionSubst(t *testing.T) {
+	// Build a type 7 (extension) subtable that points to a type 1 format 1 (single subst, delta=+5).
+	// Extension layout: u16 format=1, u16 lookupType=1, u32 offset
+	singleSubst := buildSingleSubstFormat1(t, []uint16{10, 20}, 5)
+	extOff := 8 // extension header is 8 bytes
+	var ext []byte
+	f1 := u16be(1)
+	ext = append(ext, f1[0], f1[1])
+	lt := u16be(1) // type 1 = single subst
+	ext = append(ext, lt[0], lt[1])
+	o := [4]byte{byte(extOff >> 24), byte(extOff >> 16), byte(extOff >> 8), byte(extOff)}
+	ext = append(ext, o[0], o[1], o[2], o[3])
+	ext = append(ext, singleSubst...)
+
+	font := &Font{data: ext}
+	glyphs := []Glyph{{ID: 10}, {ID: 20}, {ID: 30}}
+	result := font.applyExtensionSubst(glyphs, 0)
+
+	if result[0].ID != 15 {
+		t.Errorf("glyph[0].ID = %d, want 15", result[0].ID)
+	}
+	if result[1].ID != 25 {
+		t.Errorf("glyph[1].ID = %d, want 25", result[1].ID)
+	}
+	if result[2].ID != 30 {
+		t.Errorf("glyph[2].ID = %d, want 30 (untouched)", result[2].ID)
+	}
+}
+
+func TestContextSubstFormat3(t *testing.T) {
+	// Context substitution format 3: match 2 glyphs by coverage, then apply a nested
+	// single substitution (delta=+100) at sequence index 0.
+	//
+	// We need the nested lookup to be resolvable via gsubLookupOffset, which requires
+	// a GSUB table structure. Instead, we test the core matching + inline substitution
+	// by directly calling applyContextSubstFormat3 with synthetic data embedded in font.data.
+	//
+	// Layout of our synthetic context subst format 3:
+	// u16 format=3, u16 glyphCount=2, u16 seqLookupCount=0 (no nested lookups for simplicity),
+	// u16 coverageOffset[0], u16 coverageOffset[1]
+	//
+	// We verify matching only (since nested lookups need GSUB structure).
+	// To actually test substitution, we'll build a minimal GSUB with one lookup.
+
+	// Build a minimal GSUB table with one lookup (type 1, single subst delta=+100).
+	singleSubst := buildSingleSubstFormat1(t, []uint16{10}, 100)
+	// Lookup table: u16 type=1, u16 flag=0, u16 subtableCount=1, u16 subtableOffset
+	var lookup []byte
+	v := u16be(1) // type
+	lookup = append(lookup, v[0], v[1])
+	v = u16be(0) // flag
+	lookup = append(lookup, v[0], v[1])
+	v = u16be(1) // subtable count
+	lookup = append(lookup, v[0], v[1])
+	v = u16be(8) // subtable offset (relative to lookup start; 8 = after type+flag+count+thisOffset)
+	lookup = append(lookup, v[0], v[1])
+	// Mark filtering set not included (flag bit 4 not set)
+	lookup = append(lookup, singleSubst...)
+
+	// Lookup list: u16 lookupCount=1, u16 lookupOffset[0]
+	var lookupList []byte
+	v = u16be(1) // count
+	lookupList = append(lookupList, v[0], v[1])
+	v = u16be(4) // offset to lookup[0] relative to lookupList start
+	lookupList = append(lookupList, v[0], v[1])
+	lookupList = append(lookupList, lookup...)
+
+	// GSUB header: u16 major=1, u16 minor=0, u16 scriptListOff=10, u16 featureListOff=10, u16 lookupListOff
+	gsubHeaderSize := 10
+	lookupListAbsOff := gsubHeaderSize
+	var gsub []byte
+	v = u16be(1) // major
+	gsub = append(gsub, v[0], v[1])
+	v = u16be(0) // minor
+	gsub = append(gsub, v[0], v[1])
+	v = u16be(uint16(lookupListAbsOff)) // scriptListOff (dummy, points to lookupList)
+	gsub = append(gsub, v[0], v[1])
+	v = u16be(uint16(lookupListAbsOff)) // featureListOff (dummy)
+	gsub = append(gsub, v[0], v[1])
+	v = u16be(uint16(lookupListAbsOff)) // lookupListOff
+	gsub = append(gsub, v[0], v[1])
+	gsub = append(gsub, lookupList...)
+
+	// Now build the context subst format 3 subtable.
+	// It has 2 input coverages (glyph 10, glyph 20) and 1 seqLookupRecord (seqIdx=0, lookupIdx=0).
+	cov1 := buildCoverageFormat1([]uint16{10})
+	cov2 := buildCoverageFormat1([]uint16{20})
+	var ctx []byte
+	v = u16be(3) // format
+	ctx = append(ctx, v[0], v[1])
+	v = u16be(2) // glyphCount
+	ctx = append(ctx, v[0], v[1])
+	v = u16be(1) // seqLookupCount
+	ctx = append(ctx, v[0], v[1])
+	// coverage offsets (relative to subtable start)
+	ctxHeaderSize := 6 + 2*2 + 1*4 // format+glyphCount+seqLookupCount + 2 covOffsets + 1 seqLookupRecord
+	cov1Off := ctxHeaderSize
+	cov2Off := cov1Off + len(cov1)
+	v = u16be(uint16(cov1Off))
+	ctx = append(ctx, v[0], v[1])
+	v = u16be(uint16(cov2Off))
+	ctx = append(ctx, v[0], v[1])
+	// seqLookupRecord: seqIdx=0, lookupListIdx=0
+	v = u16be(0) // seqIdx
+	ctx = append(ctx, v[0], v[1])
+	v = u16be(0) // lookupListIdx
+	ctx = append(ctx, v[0], v[1])
+	ctx = append(ctx, cov1...)
+	ctx = append(ctx, cov2...)
+
+	// Combine: GSUB table then context subtable
+	ctxSubtableOff := len(gsub)
+	fullData := append(gsub, ctx...)
+
+	font := &Font{data: fullData}
+	font.tables[tableGsub] = tableEntry{offset: 0, length: uint32(len(fullData))}
+
+	glyphs := []Glyph{{ID: 10}, {ID: 20}, {ID: 30}}
+	result := font.applyContextSubstFormat3(glyphs, ctxSubtableOff)
+
+	// The context matches glyphs [10, 20]. The seqLookupRecord says apply lookup 0
+	// (single subst delta=+100) at seqIdx=0, so glyph 10 -> 110.
+	if result[0].ID != 110 {
+		t.Errorf("glyph[0].ID = %d, want 110", result[0].ID)
+	}
+	if result[1].ID != 20 {
+		t.Errorf("glyph[1].ID = %d, want 20 (untouched)", result[1].ID)
+	}
+	if result[2].ID != 30 {
+		t.Errorf("glyph[2].ID = %d, want 30 (untouched)", result[2].ID)
+	}
+}
+
+func TestChainContextSubstFormat3(t *testing.T) {
+	// Chaining context format 3: backtrack=[5], input=[10,20], lookahead=[30],
+	// nested single subst delta=+100 at seqIdx=1 (glyph 20 -> 120).
+
+	// Build minimal GSUB with one lookup (type 1, single subst delta=+100 covering glyph 20).
+	singleSubst := buildSingleSubstFormat1(t, []uint16{20}, 100)
+	var lookup []byte
+	v := u16be(1)
+	lookup = append(lookup, v[0], v[1]) // type
+	v = u16be(0)
+	lookup = append(lookup, v[0], v[1]) // flag
+	v = u16be(1)
+	lookup = append(lookup, v[0], v[1]) // subtableCount
+	v = u16be(8)
+	lookup = append(lookup, v[0], v[1]) // subtableOffset
+	lookup = append(lookup, singleSubst...)
+
+	var lookupList []byte
+	v = u16be(1)
+	lookupList = append(lookupList, v[0], v[1]) // count
+	v = u16be(4)
+	lookupList = append(lookupList, v[0], v[1]) // offset to lookup[0]
+	lookupList = append(lookupList, lookup...)
+
+	gsubHeaderSize := 10
+	var gsub []byte
+	for i := 0; i < 4; i++ {
+		v = u16be(uint16(gsubHeaderSize))
+		if i < 2 {
+			v = u16be(uint16(i)) // major=1, minor=0
+			if i == 0 {
+				v = u16be(1)
+			} else {
+				v = u16be(0)
+			}
+		}
+		gsub = append(gsub, v[0], v[1])
+	}
+	v = u16be(uint16(gsubHeaderSize))
+	gsub = append(gsub, v[0], v[1])
+	gsub = append(gsub, lookupList...)
+
+	// Build chaining context format 3 subtable.
+	covBacktrack := buildCoverageFormat1([]uint16{5})
+	covInput1 := buildCoverageFormat1([]uint16{10})
+	covInput2 := buildCoverageFormat1([]uint16{20})
+	covLookahead := buildCoverageFormat1([]uint16{30})
+
+	var chain []byte
+	// format=3
+	v = u16be(3)
+	chain = append(chain, v[0], v[1])
+	// backtrackGlyphCount=1
+	v = u16be(1)
+	chain = append(chain, v[0], v[1])
+	// We'll fill coverage offsets after computing positions.
+	// For now, compute the layout sizes:
+	// header: format(2) + backtrackCount(2) + backtrackCovOff(2) + inputCount(2) + inputCovOff1(2) + inputCovOff2(2) +
+	//         lookaheadCount(2) + lookaheadCovOff(2) + seqLookupCount(2) + seqLookupRecord(4) = 22
+	headerSize := 2 + 2 + 1*2 + 2 + 2*2 + 2 + 1*2 + 2 + 1*4
+	covBacktrackOff := headerSize
+	covInput1Off := covBacktrackOff + len(covBacktrack)
+	covInput2Off := covInput1Off + len(covInput1)
+	covLookaheadOff := covInput2Off + len(covInput2)
+
+	// backtrack coverage offset
+	v = u16be(uint16(covBacktrackOff))
+	chain = append(chain, v[0], v[1])
+	// inputGlyphCount=2
+	v = u16be(2)
+	chain = append(chain, v[0], v[1])
+	// input coverage offsets
+	v = u16be(uint16(covInput1Off))
+	chain = append(chain, v[0], v[1])
+	v = u16be(uint16(covInput2Off))
+	chain = append(chain, v[0], v[1])
+	// lookaheadGlyphCount=1
+	v = u16be(1)
+	chain = append(chain, v[0], v[1])
+	// lookahead coverage offset
+	v = u16be(uint16(covLookaheadOff))
+	chain = append(chain, v[0], v[1])
+	// seqLookupCount=1
+	v = u16be(1)
+	chain = append(chain, v[0], v[1])
+	// seqLookupRecord: seqIdx=1, lookupIdx=0
+	v = u16be(1)
+	chain = append(chain, v[0], v[1])
+	v = u16be(0)
+	chain = append(chain, v[0], v[1])
+	// Append coverage tables
+	chain = append(chain, covBacktrack...)
+	chain = append(chain, covInput1...)
+	chain = append(chain, covInput2...)
+	chain = append(chain, covLookahead...)
+
+	chainSubtableOff := len(gsub)
+	fullData := append(gsub, chain...)
+
+	font := &Font{data: fullData}
+	font.tables[tableGsub] = tableEntry{offset: 0, length: uint32(len(fullData))}
+
+	// Input: [5, 10, 20, 30] — backtrack=5, input=[10,20], lookahead=30
+	glyphs := []Glyph{{ID: 5}, {ID: 10}, {ID: 20}, {ID: 30}}
+	result := font.applyChainContextSubstFormat3(glyphs, chainSubtableOff)
+
+	if result[0].ID != 5 {
+		t.Errorf("glyph[0].ID = %d, want 5 (backtrack, untouched)", result[0].ID)
+	}
+	if result[1].ID != 10 {
+		t.Errorf("glyph[1].ID = %d, want 10 (input[0], not targeted by seqLookup)", result[1].ID)
+	}
+	if result[2].ID != 120 {
+		t.Errorf("glyph[2].ID = %d, want 120 (input[1], seqIdx=1 => delta+100)", result[2].ID)
+	}
+	if result[3].ID != 30 {
+		t.Errorf("glyph[3].ID = %d, want 30 (lookahead, untouched)", result[3].ID)
+	}
+}
+
+func TestChainContextSubstFormat3NoMatch(t *testing.T) {
+	// Same structure as above but input doesn't match — backtrack glyph is wrong.
+	covBacktrack := buildCoverageFormat1([]uint16{5})
+	covInput := buildCoverageFormat1([]uint16{10})
+	covLookahead := buildCoverageFormat1([]uint16{30})
+
+	var chain []byte
+	v := u16be(3)
+	chain = append(chain, v[0], v[1]) // format
+	v = u16be(1)
+	chain = append(chain, v[0], v[1]) // backtrackCount
+	headerSize := 2 + 2 + 1*2 + 2 + 1*2 + 2 + 1*2 + 2 + 0*4
+	v = u16be(uint16(headerSize))
+	chain = append(chain, v[0], v[1]) // backtrack cov offset
+	v = u16be(1)
+	chain = append(chain, v[0], v[1]) // inputCount
+	v = u16be(uint16(headerSize + len(covBacktrack)))
+	chain = append(chain, v[0], v[1]) // input cov offset
+	v = u16be(1)
+	chain = append(chain, v[0], v[1]) // lookaheadCount
+	v = u16be(uint16(headerSize + len(covBacktrack) + len(covInput)))
+	chain = append(chain, v[0], v[1]) // lookahead cov offset
+	v = u16be(0)
+	chain = append(chain, v[0], v[1]) // seqLookupCount=0
+	chain = append(chain, covBacktrack...)
+	chain = append(chain, covInput...)
+	chain = append(chain, covLookahead...)
+
+	font := &Font{data: chain}
+	// Wrong backtrack: 99 instead of 5
+	glyphs := []Glyph{{ID: 99}, {ID: 10}, {ID: 30}}
+	result := font.applyChainContextSubstFormat3(glyphs, 0)
+
+	// No match, all IDs unchanged.
+	for i, g := range result {
+		if g.ID != glyphs[i].ID {
+			t.Errorf("glyph[%d].ID = %d, want %d (no match expected)", i, g.ID, glyphs[i].ID)
+		}
+	}
+}
+
+func TestReverseChainSubst(t *testing.T) {
+	// Reverse chain single substitution:
+	// coverage: glyph 10, backtrack: glyph 5, lookahead: glyph 30.
+	// substitute: 10 -> 999.
+	covMain := buildCoverageFormat1([]uint16{10})
+	covBacktrack := buildCoverageFormat1([]uint16{5})
+	covLookahead := buildCoverageFormat1([]uint16{30})
+
+	var data []byte
+	v := u16be(1) // format
+	data = append(data, v[0], v[1])
+	// coverage offset (relative to subtable start)
+	// header: format(2) + covOff(2) + backtrackCount(2) + backtrackCovOff(2) +
+	//         lookaheadCount(2) + lookaheadCovOff(2) + substGlyphCount(2) + substGlyph(2) = 16
+	headerSize := 16
+	mainCovOff := headerSize
+	backtrackCovOff := mainCovOff + len(covMain)
+	lookaheadCovOff := backtrackCovOff + len(covBacktrack)
+
+	v = u16be(uint16(mainCovOff))
+	data = append(data, v[0], v[1]) // coverageOffset
+	v = u16be(1)
+	data = append(data, v[0], v[1]) // backtrackGlyphCount
+	v = u16be(uint16(backtrackCovOff))
+	data = append(data, v[0], v[1]) // backtrackCoverageOffset[0]
+	v = u16be(1)
+	data = append(data, v[0], v[1]) // lookaheadGlyphCount
+	v = u16be(uint16(lookaheadCovOff))
+	data = append(data, v[0], v[1]) // lookaheadCoverageOffset[0]
+	v = u16be(1)
+	data = append(data, v[0], v[1]) // substituteGlyphCount
+	v = u16be(999)
+	data = append(data, v[0], v[1]) // substituteGlyphID[0]
+	data = append(data, covMain...)
+	data = append(data, covBacktrack...)
+	data = append(data, covLookahead...)
+
+	font := &Font{data: data}
+	glyphs := []Glyph{{ID: 5}, {ID: 10}, {ID: 30}}
+	result := font.applyReverseChainSubst(glyphs, 0)
+
+	if result[0].ID != 5 {
+		t.Errorf("glyph[0].ID = %d, want 5 (backtrack)", result[0].ID)
+	}
+	if result[1].ID != 999 {
+		t.Errorf("glyph[1].ID = %d, want 999 (substituted)", result[1].ID)
+	}
+	if result[2].ID != 30 {
+		t.Errorf("glyph[2].ID = %d, want 30 (lookahead)", result[2].ID)
+	}
+	if result[1].Flags&GlyphFlagGeneratedByGSUB == 0 {
+		t.Error("substituted glyph should have GlyphFlagGeneratedByGSUB")
+	}
+}
+
+func TestReverseChainSubstNoMatch(t *testing.T) {
+	// No backtrack match — glyph should not be substituted.
+	covMain := buildCoverageFormat1([]uint16{10})
+	covBacktrack := buildCoverageFormat1([]uint16{5})
+
+	var data []byte
+	v := u16be(1) // format
+	data = append(data, v[0], v[1])
+	headerSize := 14 // no lookahead
+	mainCovOff := headerSize
+	backtrackCovOff := mainCovOff + len(covMain)
+
+	v = u16be(uint16(mainCovOff))
+	data = append(data, v[0], v[1])
+	v = u16be(1)
+	data = append(data, v[0], v[1]) // backtrackCount
+	v = u16be(uint16(backtrackCovOff))
+	data = append(data, v[0], v[1])
+	v = u16be(0)
+	data = append(data, v[0], v[1]) // lookaheadCount=0
+	v = u16be(1)
+	data = append(data, v[0], v[1]) // substGlyphCount
+	v = u16be(999)
+	data = append(data, v[0], v[1]) // substGlyphID
+	data = append(data, covMain...)
+	data = append(data, covBacktrack...)
+
+	font := &Font{data: data}
+	// Backtrack is 99, not 5 — should not match.
+	glyphs := []Glyph{{ID: 99}, {ID: 10}}
+	result := font.applyReverseChainSubst(glyphs, 0)
+
+	if result[1].ID != 10 {
+		t.Errorf("glyph[1].ID = %d, want 10 (no match)", result[1].ID)
+	}
+}
+
+func buildAlternateSubst(t *testing.T, covGlyphs []uint16, altSets [][]uint16) []byte {
+	t.Helper()
+	// Layout: u16 format=1, u16 coverageOffset, u16 altSetCount, u16[] altSetOffsets,
+	//         then alternate set tables, then coverage table.
+	altSetCount := len(altSets)
+	altSetOffsetsStart := 6 + altSetCount*2
+	var altData []byte
+	altSetOffsets := make([]int, altSetCount)
+	for i, alts := range altSets {
+		altSetOffsets[i] = altSetOffsetsStart + len(altData)
+		gc := u16be(uint16(len(alts)))
+		altData = append(altData, gc[0], gc[1])
+		for _, gid := range alts {
+			v := u16be(gid)
+			altData = append(altData, v[0], v[1])
+		}
+	}
+	covOff := altSetOffsetsStart + len(altData)
+	cov := buildCoverageFormat1(covGlyphs)
+
+	var b []byte
+	f := u16be(1)
+	b = append(b, f[0], f[1])
+	co := u16be(uint16(covOff))
+	b = append(b, co[0], co[1])
+	ac := u16be(uint16(altSetCount))
+	b = append(b, ac[0], ac[1])
+	for _, off := range altSetOffsets {
+		v := u16be(uint16(off))
+		b = append(b, v[0], v[1])
+	}
+	b = append(b, altData...)
+	b = append(b, cov...)
+	return b
 }

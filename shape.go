@@ -114,22 +114,36 @@ func (cfg *ShapeConfig) Shape(dst []Run, text string, breaks []Break) []Run {
 		return boundaries[i]
 	}
 
-	// Check if ligatures are disabled via feature overrides.
-	ligaEnabled := true
+	// Build disabled feature set from overrides.
+	var disabledFeatures map[FeatureTag]bool
 	for _, fo := range cfg.Features {
-		if fo.Tag == FeatureTagLiga && fo.Value == 0 {
-			ligaEnabled = false
+		if fo.Value == 0 {
+			if disabledFeatures == nil {
+				disabledFeatures = make(map[FeatureTag]bool)
+			}
+			disabledFeatures[fo.Tag] = true
 		}
 	}
 
 	emitRun := func(glyphs []Glyph, props runProps) Run {
-		if ligaEnabled {
-			glyphs = f.applyGSUBLigatures(glyphs)
-		}
+		// Apply standard GSUB features.
+		glyphs = f.applyGSUBFeatures(glyphs, defaultGSUBFeatures[:], disabledFeatures)
+
 		// Recompute advances after substitution (ligature glyphs have different advances).
 		for i := range glyphs {
 			glyphs[i].AdvanceX = f.glyphAdvance(glyphs[i].ID)
 		}
+
+		// Apply GPOS kerning.
+		f.applyGPOSKerning(glyphs, disabledFeatures)
+
+		// RTL: reverse glyph order for right-to-left runs.
+		if props.dir == DirectionRTL {
+			for lo, hi := 0, len(glyphs)-1; lo < hi; lo, hi = lo+1, hi-1 {
+				glyphs[lo], glyphs[hi] = glyphs[hi], glyphs[lo]
+			}
+		}
+
 		return Run{
 			Font:               f,
 			Script:             props.script,

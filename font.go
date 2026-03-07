@@ -535,6 +535,122 @@ func widthClassToFontWidth(wc uint16) FontWidth {
 	}
 }
 
+// glyphClass represents an OpenType glyph class from the GDEF table.
+type glyphClass uint16
+
+const (
+	glyphClassZero      glyphClass = 0 // not in class definition (unclassified)
+	glyphClassBase      glyphClass = 1
+	glyphClassLigature  glyphClass = 2
+	glyphClassMark      glyphClass = 3
+	glyphClassComponent glyphClass = 4
+)
+
+// glyphClassDef returns the glyph class for a glyph ID from the GDEF GlyphClassDef table.
+// Returns glyphClassZero if the font has no GDEF table or the glyph is not classified.
+func (f *Font) glyphClassDef(glyphID uint16) glyphClass {
+	te := f.tables[tableGdef]
+	if te.length < 8 {
+		return glyphClassZero
+	}
+	base := int(te.offset)
+	if base+8 > len(f.data) {
+		return glyphClassZero
+	}
+	classDefOff := int(readU16BE(f.data, base+4))
+	if classDefOff == 0 {
+		return glyphClassZero
+	}
+	return glyphClass(classDefLookup(f.data, base+classDefOff, glyphID))
+}
+
+// markAttachmentClass returns the mark attachment class for a glyph ID from the GDEF table.
+// Only meaningful when glyphClassDef returns glyphClassMark.
+// Returns 0 if not available.
+func (f *Font) markAttachmentClass(glyphID uint16) uint16 {
+	te := f.tables[tableGdef]
+	if te.length < 12 {
+		return 0
+	}
+	base := int(te.offset)
+	if base+12 > len(f.data) {
+		return 0
+	}
+	markAttachOff := int(readU16BE(f.data, base+10))
+	if markAttachOff == 0 {
+		return 0
+	}
+	return classDefLookup(f.data, base+markAttachOff, glyphID)
+}
+
+// classDefLookup looks up a glyph ID in an OpenType ClassDef table (format 1 or 2).
+// Returns the class value, or 0 if the glyph is not found.
+// absOff is the absolute offset of the ClassDef table in data.
+func classDefLookup(data []byte, absOff int, glyphID uint16) uint16 {
+	if absOff+4 > len(data) {
+		return 0
+	}
+	format := readU16BE(data, absOff)
+	switch format {
+	case 1:
+		return classDefFormat1Lookup(data, absOff, glyphID)
+	case 2:
+		return classDefFormat2Lookup(data, absOff, glyphID)
+	default:
+		return 0
+	}
+}
+
+// classDefFormat1Lookup implements ClassDef format 1 (range of glyph IDs).
+// Layout: u16 format=1, u16 startGlyphID, u16 glyphCount, u16[glyphCount] classValues
+func classDefFormat1Lookup(data []byte, off int, glyphID uint16) uint16 {
+	if off+6 > len(data) {
+		return 0
+	}
+	startGlyph := readU16BE(data, off+2)
+	glyphCount := int(readU16BE(data, off+4))
+	if glyphID < startGlyph {
+		return 0
+	}
+	idx := int(glyphID - startGlyph)
+	if idx >= glyphCount {
+		return 0
+	}
+	arrOff := off + 6 + idx*2
+	if arrOff+2 > len(data) {
+		return 0
+	}
+	return readU16BE(data, arrOff)
+}
+
+// classDefFormat2Lookup implements ClassDef format 2 (ranges with class values).
+// Layout: u16 format=2, u16 rangeCount, {u16 startGlyph, u16 endGlyph, u16 class}[rangeCount]
+func classDefFormat2Lookup(data []byte, off int, glyphID uint16) uint16 {
+	if off+4 > len(data) {
+		return 0
+	}
+	rangeCount := int(readU16BE(data, off+2))
+	if off+4+rangeCount*6 > len(data) {
+		return 0
+	}
+	// Binary search.
+	lo, hi := 0, rangeCount-1
+	for lo <= hi {
+		mid := (lo + hi) / 2
+		recOff := off + 4 + mid*6
+		startGlyph := readU16BE(data, recOff)
+		endGlyph := readU16BE(data, recOff+2)
+		if glyphID < startGlyph {
+			hi = mid - 1
+		} else if glyphID > endGlyph {
+			lo = mid + 1
+		} else {
+			return readU16BE(data, recOff+4)
+		}
+	}
+	return 0
+}
+
 // findGSUBFeatureIndices returns all indices in the GSUB FeatureList matching a feature tag.
 func (f *Font) findGSUBFeatureIndices(dst []int, tag FeatureTag) []int {
 	te := f.tables[tableGsub]
@@ -613,19 +729,24 @@ func (f *Font) gsubFeatureLookups(featureIndex int) []uint16 {
 	return lookups
 }
 
-// applyGSUBLigatures applies GSUB ligature substitutions (lookup type 4) to glyphs.
-// This is a minimal implementation covering the 'liga' feature path.
-func (f *Font) applyGSUBLigatures(glyphs []Glyph) []Glyph {
+// defaultGSUBFeatures is the standard set of GSUB features applied for the Default shaper.
+// Order matters: ccmp and locl first (composition/decomposition), then ligatures and contextual alternates.
+var defaultGSUBFeatures = [...]FeatureTag{
+	FeatureTagLocl, // Localized forms
+	FeatureTagCcmp, // Glyph composition/decomposition
+	FeatureTagRlig, // Required ligatures
+	FeatureTagRclt, // Required contextual alternates
+	FeatureTagCalt, // Contextual alternates
+	FeatureTagLiga, // Standard ligatures
+}
+
+// applyGSUBFeatures applies GSUB substitutions for a set of features.
+// disabledFeatures is a set of feature tags that have been disabled via overrides.
+func (f *Font) applyGSUBFeatures(glyphs []Glyph, features []FeatureTag, disabledFeatures map[FeatureTag]bool) []Glyph {
 	te := f.tables[tableGsub]
 	if te.length == 0 {
 		return glyphs
 	}
-	var idxBuf [4]int
-	featureIndices := f.findGSUBFeatureIndices(idxBuf[:0], FeatureTagLiga)
-	if len(featureIndices) == 0 {
-		return glyphs
-	}
-
 	base := int(te.offset)
 	if base+10 > len(f.data) {
 		return glyphs
@@ -636,17 +757,30 @@ func (f *Font) applyGSUBLigatures(glyphs []Glyph) []Glyph {
 	}
 	lookupCount := int(readU16BE(f.data, lookupListOff))
 
-	for _, fi := range featureIndices {
-		lookupIndices := f.gsubFeatureLookups(fi)
-		for _, li := range lookupIndices {
-			if int(li) >= lookupCount {
-				continue
+	var idxBuf [4]int
+	for _, tag := range features {
+		if disabledFeatures != nil && disabledFeatures[tag] {
+			continue
+		}
+		featureIndices := f.findGSUBFeatureIndices(idxBuf[:0], tag)
+		for _, fi := range featureIndices {
+			lookupIndices := f.gsubFeatureLookups(fi)
+			for _, li := range lookupIndices {
+				if int(li) >= lookupCount {
+					continue
+				}
+				lookupOff := lookupListOff + int(readU16BE(f.data, lookupListOff+2+int(li)*2))
+				glyphs = f.applyGSUBLookup(glyphs, lookupOff)
 			}
-			lookupOff := lookupListOff + int(readU16BE(f.data, lookupListOff+2+int(li)*2))
-			glyphs = f.applyGSUBLookup(glyphs, lookupOff)
 		}
 	}
 	return glyphs
+}
+
+// applyGSUBLigatures applies GSUB ligature substitutions (lookup type 4) to glyphs.
+// Deprecated: Use applyGSUBFeatures instead. Kept for backward compatibility.
+func (f *Font) applyGSUBLigatures(glyphs []Glyph) []Glyph {
+	return f.applyGSUBFeatures(glyphs, []FeatureTag{FeatureTagLiga}, nil)
 }
 
 // applyGSUBLookup applies a single GSUB lookup to glyphs.
@@ -661,13 +795,568 @@ func (f *Font) applyGSUBLookup(glyphs []Glyph, lookupOff int) []Glyph {
 		return glyphs
 	}
 
-	if lookupType != 4 {
-		return glyphs // only handle ligature substitution (type 4)
-	}
-
 	for si := 0; si < subtableCount; si++ {
 		subtableOff := lookupOff + int(readU16BE(f.data, lookupOff+6+si*2))
-		glyphs = f.applyLigatureSubtable(glyphs, subtableOff)
+		switch lookupType {
+		case 1:
+			glyphs = f.applySingleSubst(glyphs, subtableOff)
+		case 2:
+			glyphs = f.applyMultipleSubst(glyphs, subtableOff)
+		case 3:
+			glyphs = f.applyAlternateSubst(glyphs, subtableOff, 0)
+		case 4:
+			glyphs = f.applyLigatureSubtable(glyphs, subtableOff)
+		case 5:
+			glyphs = f.applyContextSubst(glyphs, subtableOff)
+		case 6:
+			glyphs = f.applyChainContextSubst(glyphs, subtableOff)
+		case 7:
+			glyphs = f.applyExtensionSubst(glyphs, subtableOff)
+		case 8:
+			glyphs = f.applyReverseChainSubst(glyphs, subtableOff)
+		}
+	}
+	return glyphs
+}
+
+// applySingleSubst applies a GSUB type 1 (single substitution) subtable.
+// Format 1: replace glyph ID by adding a delta.
+// Format 2: replace glyph ID from an array indexed by coverage index.
+func (f *Font) applySingleSubst(glyphs []Glyph, subtableOff int) []Glyph {
+	if subtableOff+6 > len(f.data) {
+		return glyphs
+	}
+	format := readU16BE(f.data, subtableOff)
+	coverageOff := subtableOff + int(readU16BE(f.data, subtableOff+2))
+
+	switch format {
+	case 1:
+		// Format 1: delta substitution.
+		deltaGlyphID := int16(readU16BE(f.data, subtableOff+4))
+		for i := range glyphs {
+			covIdx := f.coverageIndex(coverageOff, glyphs[i].ID)
+			if covIdx >= 0 {
+				// "Addition of deltaGlyphID is modulo 65536."
+				glyphs[i].ID = uint16(int32(glyphs[i].ID) + int32(deltaGlyphID))
+				glyphs[i].Flags |= GlyphFlagGeneratedByGSUB
+			}
+		}
+	case 2:
+		// Format 2: substitution array.
+		glyphCount := int(readU16BE(f.data, subtableOff+4))
+		if subtableOff+6+glyphCount*2 > len(f.data) {
+			return glyphs
+		}
+		for i := range glyphs {
+			covIdx := f.coverageIndex(coverageOff, glyphs[i].ID)
+			if covIdx >= 0 && covIdx < glyphCount {
+				glyphs[i].ID = readU16BE(f.data, subtableOff+6+covIdx*2)
+				glyphs[i].Flags |= GlyphFlagGeneratedByGSUB
+			}
+		}
+	}
+	return glyphs
+}
+
+// applyMultipleSubst applies a GSUB type 2 (multiple substitution) subtable.
+// Replaces one glyph with a sequence of glyphs (1:N).
+func (f *Font) applyMultipleSubst(glyphs []Glyph, subtableOff int) []Glyph {
+	if subtableOff+6 > len(f.data) {
+		return glyphs
+	}
+	format := readU16BE(f.data, subtableOff)
+	if format != 1 {
+		return glyphs
+	}
+	coverageOff := subtableOff + int(readU16BE(f.data, subtableOff+2))
+	seqCount := int(readU16BE(f.data, subtableOff+4))
+	if subtableOff+6+seqCount*2 > len(f.data) {
+		return glyphs
+	}
+
+	i := 0
+	for i < len(glyphs) {
+		covIdx := f.coverageIndex(coverageOff, glyphs[i].ID)
+		if covIdx < 0 || covIdx >= seqCount {
+			i++
+			continue
+		}
+		seqOff := subtableOff + int(readU16BE(f.data, subtableOff+6+covIdx*2))
+		if seqOff+2 > len(f.data) {
+			i++
+			continue
+		}
+		substCount := int(readU16BE(f.data, seqOff))
+		if substCount == 0 {
+			// Deletion: remove the glyph.
+			glyphs = append(glyphs[:i], glyphs[i+1:]...)
+			continue
+		}
+		if seqOff+2+substCount*2 > len(f.data) {
+			i++
+			continue
+		}
+		// Replace current glyph with first substitute.
+		origGlyph := glyphs[i]
+		glyphs[i].ID = readU16BE(f.data, seqOff+2)
+		glyphs[i].Flags |= GlyphFlagMultipleSubstitution | GlyphFlagFirstInMultiple | GlyphFlagGeneratedByGSUB
+
+		if substCount > 1 {
+			// Insert remaining substitutes after position i.
+			newGlyphs := make([]Glyph, substCount-1)
+			for j := range newGlyphs {
+				newGlyphs[j] = origGlyph
+				newGlyphs[j].ID = readU16BE(f.data, seqOff+2+(j+1)*2)
+				newGlyphs[j].Flags |= GlyphFlagMultipleSubstitution | GlyphFlagGeneratedByGSUB
+			}
+			// Insert after i: glyphs[:i+1] + newGlyphs + glyphs[i+1:]
+			glyphs = append(glyphs[:i+1], append(newGlyphs, glyphs[i+1:]...)...)
+			i += substCount
+		} else {
+			i++
+		}
+	}
+	return glyphs
+}
+
+// applyAlternateSubst applies a GSUB type 3 (alternate substitution) subtable.
+// altIndex selects which alternate to use (0-based). If out of range, uses index 0.
+func (f *Font) applyAlternateSubst(glyphs []Glyph, subtableOff int, altIndex int) []Glyph {
+	if subtableOff+6 > len(f.data) {
+		return glyphs
+	}
+	format := readU16BE(f.data, subtableOff)
+	if format != 1 {
+		return glyphs
+	}
+	coverageOff := subtableOff + int(readU16BE(f.data, subtableOff+2))
+	altSetCount := int(readU16BE(f.data, subtableOff+4))
+	if subtableOff+6+altSetCount*2 > len(f.data) {
+		return glyphs
+	}
+
+	for i := range glyphs {
+		covIdx := f.coverageIndex(coverageOff, glyphs[i].ID)
+		if covIdx < 0 || covIdx >= altSetCount {
+			continue
+		}
+		altSetOff := subtableOff + int(readU16BE(f.data, subtableOff+6+covIdx*2))
+		if altSetOff+2 > len(f.data) {
+			continue
+		}
+		altCount := int(readU16BE(f.data, altSetOff))
+		if altCount == 0 || altSetOff+2+altCount*2 > len(f.data) {
+			continue
+		}
+		idx := altIndex
+		if idx >= altCount {
+			idx = 0
+		}
+		glyphs[i].ID = readU16BE(f.data, altSetOff+2+idx*2)
+		glyphs[i].Flags |= GlyphFlagGeneratedByGSUB
+	}
+	return glyphs
+}
+
+// gsubLookupOffset resolves a lookup index to an absolute offset in the font data.
+// Returns -1 if the index is out of range.
+func (f *Font) gsubLookupOffset(lookupIndex uint16) int {
+	te := f.tables[tableGsub]
+	if te.length == 0 {
+		return -1
+	}
+	base := int(te.offset)
+	if base+10 > len(f.data) {
+		return -1
+	}
+	lookupListOff := base + int(readU16BE(f.data, base+8))
+	if lookupListOff+2 > len(f.data) {
+		return -1
+	}
+	lookupCount := int(readU16BE(f.data, lookupListOff))
+	if int(lookupIndex) >= lookupCount {
+		return -1
+	}
+	off := lookupListOff + 2 + int(lookupIndex)*2
+	if off+2 > len(f.data) {
+		return -1
+	}
+	return lookupListOff + int(readU16BE(f.data, off))
+}
+
+// applyExtensionSubst applies a GSUB type 7 (extension substitution) subtable.
+// This is just an indirection: it reads the real lookup type and offset, then dispatches.
+func (f *Font) applyExtensionSubst(glyphs []Glyph, subtableOff int) []Glyph {
+	if subtableOff+8 > len(f.data) {
+		return glyphs
+	}
+	format := readU16BE(f.data, subtableOff)
+	if format != 1 {
+		return glyphs
+	}
+	extLookupType := readU16BE(f.data, subtableOff+2)
+	extOffset := int(readU32BE(f.data, subtableOff+4))
+	realSubtableOff := subtableOff + extOffset
+
+	switch extLookupType {
+	case 1:
+		glyphs = f.applySingleSubst(glyphs, realSubtableOff)
+	case 2:
+		glyphs = f.applyMultipleSubst(glyphs, realSubtableOff)
+	case 3:
+		glyphs = f.applyAlternateSubst(glyphs, realSubtableOff, 0)
+	case 4:
+		glyphs = f.applyLigatureSubtable(glyphs, realSubtableOff)
+	case 5:
+		glyphs = f.applyContextSubst(glyphs, realSubtableOff)
+	case 6:
+		glyphs = f.applyChainContextSubst(glyphs, realSubtableOff)
+	case 8:
+		glyphs = f.applyReverseChainSubst(glyphs, realSubtableOff)
+	}
+	return glyphs
+}
+
+// sequenceLookupRecord represents an OpenType SequenceLookupRecord.
+type sequenceLookupRecord struct {
+	sequenceIndex   uint16
+	lookupListIndex uint16
+}
+
+// applySequenceLookups applies nested lookups from SequenceLookupRecords to matched glyphs.
+// matchStart is the index of the first matched glyph. matchLen is the number of matched input glyphs.
+func (f *Font) applySequenceLookups(glyphs []Glyph, matchStart int, records []sequenceLookupRecord) []Glyph {
+	for _, rec := range records {
+		pos := matchStart + int(rec.sequenceIndex)
+		if pos >= len(glyphs) {
+			continue
+		}
+		lookupOff := f.gsubLookupOffset(rec.lookupListIndex)
+		if lookupOff < 0 || lookupOff+6 > len(f.data) {
+			continue
+		}
+		lookupType := readU16BE(f.data, lookupOff)
+		subtableCount := int(readU16BE(f.data, lookupOff+4))
+		if lookupOff+6+subtableCount*2 > len(f.data) {
+			continue
+		}
+		// Apply each subtable of the nested lookup to the single glyph at pos.
+		for si := 0; si < subtableCount; si++ {
+			stOff := lookupOff + int(readU16BE(f.data, lookupOff+6+si*2))
+			switch lookupType {
+			case 1:
+				// Single substitution — apply only to glyph at pos.
+				if stOff+6 > len(f.data) {
+					continue
+				}
+				format := readU16BE(f.data, stOff)
+				coverageOff := stOff + int(readU16BE(f.data, stOff+2))
+				covIdx := f.coverageIndex(coverageOff, glyphs[pos].ID)
+				if covIdx < 0 {
+					continue
+				}
+				switch format {
+				case 1:
+					delta := int16(readU16BE(f.data, stOff+4))
+					glyphs[pos].ID = uint16(int32(glyphs[pos].ID) + int32(delta))
+					glyphs[pos].Flags |= GlyphFlagGeneratedByGSUB
+				case 2:
+					glyphCount := int(readU16BE(f.data, stOff+4))
+					if covIdx < glyphCount && stOff+6+covIdx*2+2 <= len(f.data) {
+						glyphs[pos].ID = readU16BE(f.data, stOff+6+covIdx*2)
+						glyphs[pos].Flags |= GlyphFlagGeneratedByGSUB
+					}
+				}
+			case 4:
+				// Ligature — apply at pos within the remaining slice.
+				glyphs = f.applyLigatureSubtable(glyphs, stOff)
+			}
+		}
+	}
+	return glyphs
+}
+
+// readSequenceLookupRecords reads n SequenceLookupRecords starting at off.
+func (f *Font) readSequenceLookupRecords(off int, n int) []sequenceLookupRecord {
+	if n <= 0 || off+n*4 > len(f.data) {
+		return nil
+	}
+	records := make([]sequenceLookupRecord, n)
+	for i := range records {
+		records[i].sequenceIndex = readU16BE(f.data, off+i*4)
+		records[i].lookupListIndex = readU16BE(f.data, off+i*4+2)
+	}
+	return records
+}
+
+// applyContextSubst applies a GSUB type 5 (context substitution) subtable.
+// Currently implements format 3 (coverage-based).
+func (f *Font) applyContextSubst(glyphs []Glyph, subtableOff int) []Glyph {
+	if subtableOff+6 > len(f.data) {
+		return glyphs
+	}
+	format := readU16BE(f.data, subtableOff)
+	switch format {
+	case 3:
+		return f.applyContextSubstFormat3(glyphs, subtableOff)
+	}
+	return glyphs
+}
+
+// applyContextSubstFormat3 implements context substitution format 3 (coverage-based).
+// Layout: u16 format=3, u16 glyphCount, u16 seqLookupCount, u16[glyphCount] coverageOffsets,
+//
+//	{u16 seqIdx, u16 lookupIdx}[seqLookupCount]
+func (f *Font) applyContextSubstFormat3(glyphs []Glyph, subtableOff int) []Glyph {
+	if subtableOff+6 > len(f.data) {
+		return glyphs
+	}
+	glyphCount := int(readU16BE(f.data, subtableOff+2))
+	seqLookupCount := int(readU16BE(f.data, subtableOff+4))
+	if glyphCount < 1 {
+		return glyphs
+	}
+	coveragesOff := subtableOff + 6
+	if coveragesOff+glyphCount*2+seqLookupCount*4 > len(f.data) {
+		return glyphs
+	}
+	recordsOff := coveragesOff + glyphCount*2
+
+	i := 0
+	for i <= len(glyphs)-glyphCount {
+		// Check all input glyphs against their respective coverages.
+		matched := true
+		for gi := 0; gi < glyphCount; gi++ {
+			covOff := subtableOff + int(readU16BE(f.data, coveragesOff+gi*2))
+			if f.coverageIndex(covOff, glyphs[i+gi].ID) < 0 {
+				matched = false
+				break
+			}
+		}
+		if !matched {
+			i++
+			continue
+		}
+		records := f.readSequenceLookupRecords(recordsOff, seqLookupCount)
+		glyphs = f.applySequenceLookups(glyphs, i, records)
+		i += glyphCount
+	}
+	return glyphs
+}
+
+// applyChainContextSubst applies a GSUB type 6 (chaining context substitution) subtable.
+// Currently implements format 3 (coverage-based).
+func (f *Font) applyChainContextSubst(glyphs []Glyph, subtableOff int) []Glyph {
+	if subtableOff+4 > len(f.data) {
+		return glyphs
+	}
+	format := readU16BE(f.data, subtableOff)
+	switch format {
+	case 3:
+		return f.applyChainContextSubstFormat3(glyphs, subtableOff)
+	}
+	return glyphs
+}
+
+// applyChainContextSubstFormat3 implements chaining context substitution format 3.
+// Variable-length layout:
+//
+//	u16 format=3
+//	u16 backtrackGlyphCount
+//	u16[backtrackGlyphCount] backtrackCoverageOffsets
+//	u16 inputGlyphCount
+//	u16[inputGlyphCount] inputCoverageOffsets
+//	u16 lookaheadGlyphCount
+//	u16[lookaheadGlyphCount] lookaheadCoverageOffsets
+//	u16 seqLookupCount
+//	{u16 seqIdx, u16 lookupIdx}[seqLookupCount]
+func (f *Font) applyChainContextSubstFormat3(glyphs []Glyph, subtableOff int) []Glyph {
+	if subtableOff+4 > len(f.data) {
+		return glyphs
+	}
+	off := subtableOff + 2
+	// Backtrack coverages.
+	backtrackCount := int(readU16BE(f.data, off))
+	off += 2
+	backtrackCovsOff := off
+	off += backtrackCount * 2
+	if off+2 > len(f.data) {
+		return glyphs
+	}
+	// Input coverages.
+	inputCount := int(readU16BE(f.data, off))
+	off += 2
+	inputCovsOff := off
+	off += inputCount * 2
+	if off+2 > len(f.data) {
+		return glyphs
+	}
+	// Lookahead coverages.
+	lookaheadCount := int(readU16BE(f.data, off))
+	off += 2
+	lookaheadCovsOff := off
+	off += lookaheadCount * 2
+	if off+2 > len(f.data) {
+		return glyphs
+	}
+	// Sequence lookup records.
+	seqLookupCount := int(readU16BE(f.data, off))
+	off += 2
+	recordsOff := off
+	if recordsOff+seqLookupCount*4 > len(f.data) {
+		return glyphs
+	}
+	if inputCount < 1 {
+		return glyphs
+	}
+
+	for i := 0; i <= len(glyphs)-inputCount; i++ {
+		// Check backtrack: glyphs before i, in reverse order.
+		if i < backtrackCount {
+			continue
+		}
+		backtrackOK := true
+		for bi := 0; bi < backtrackCount; bi++ {
+			covOff := subtableOff + int(readU16BE(f.data, backtrackCovsOff+bi*2))
+			// Backtrack[0] matches glyph immediately before input, etc.
+			if f.coverageIndex(covOff, glyphs[i-1-bi].ID) < 0 {
+				backtrackOK = false
+				break
+			}
+		}
+		if !backtrackOK {
+			continue
+		}
+
+		// Check input sequence.
+		inputOK := true
+		for gi := 0; gi < inputCount; gi++ {
+			if i+gi >= len(glyphs) {
+				inputOK = false
+				break
+			}
+			covOff := subtableOff + int(readU16BE(f.data, inputCovsOff+gi*2))
+			if f.coverageIndex(covOff, glyphs[i+gi].ID) < 0 {
+				inputOK = false
+				break
+			}
+		}
+		if !inputOK {
+			continue
+		}
+
+		// Check lookahead: glyphs after input sequence.
+		lookaheadStart := i + inputCount
+		lookaheadOK := true
+		for li := 0; li < lookaheadCount; li++ {
+			if lookaheadStart+li >= len(glyphs) {
+				lookaheadOK = false
+				break
+			}
+			covOff := subtableOff + int(readU16BE(f.data, lookaheadCovsOff+li*2))
+			if f.coverageIndex(covOff, glyphs[lookaheadStart+li].ID) < 0 {
+				lookaheadOK = false
+				break
+			}
+		}
+		if !lookaheadOK {
+			continue
+		}
+
+		// All matched — apply sequence lookups.
+		records := f.readSequenceLookupRecords(recordsOff, seqLookupCount)
+		glyphs = f.applySequenceLookups(glyphs, i, records)
+		i += inputCount - 1 // advance past matched input
+	}
+	return glyphs
+}
+
+// applyReverseChainSubst applies a GSUB type 8 (reverse chaining context single substitution).
+// Processes glyphs in reverse order (right to left).
+// Layout:
+//
+//	u16 format=1, u16 coverageOffset, u16 backtrackGlyphCount,
+//	u16[backtrackCount] backtrackCoverageOffsets,
+//	u16 lookaheadGlyphCount, u16[lookaheadCount] lookaheadCoverageOffsets,
+//	u16 glyphCount, u16[glyphCount] substituteGlyphIDs
+func (f *Font) applyReverseChainSubst(glyphs []Glyph, subtableOff int) []Glyph {
+	if subtableOff+6 > len(f.data) {
+		return glyphs
+	}
+	format := readU16BE(f.data, subtableOff)
+	if format != 1 {
+		return glyphs
+	}
+	coverageOff := subtableOff + int(readU16BE(f.data, subtableOff+2))
+	off := subtableOff + 4
+
+	// Backtrack coverages.
+	backtrackCount := int(readU16BE(f.data, off))
+	off += 2
+	backtrackCovsOff := off
+	off += backtrackCount * 2
+	if off+2 > len(f.data) {
+		return glyphs
+	}
+	// Lookahead coverages.
+	lookaheadCount := int(readU16BE(f.data, off))
+	off += 2
+	lookaheadCovsOff := off
+	off += lookaheadCount * 2
+	if off+2 > len(f.data) {
+		return glyphs
+	}
+	// Substitute glyph IDs.
+	substGlyphCount := int(readU16BE(f.data, off))
+	off += 2
+	substOff := off
+	if substOff+substGlyphCount*2 > len(f.data) {
+		return glyphs
+	}
+
+	// Process in reverse order.
+	for i := len(glyphs) - 1; i >= 0; i-- {
+		covIdx := f.coverageIndex(coverageOff, glyphs[i].ID)
+		if covIdx < 0 || covIdx >= substGlyphCount {
+			continue
+		}
+
+		// Check backtrack: glyphs before i, in reverse.
+		if i < backtrackCount {
+			continue
+		}
+		backtrackOK := true
+		for bi := 0; bi < backtrackCount; bi++ {
+			covOff := subtableOff + int(readU16BE(f.data, backtrackCovsOff+bi*2))
+			if f.coverageIndex(covOff, glyphs[i-1-bi].ID) < 0 {
+				backtrackOK = false
+				break
+			}
+		}
+		if !backtrackOK {
+			continue
+		}
+
+		// Check lookahead: glyphs after i.
+		lookaheadOK := true
+		for li := 0; li < lookaheadCount; li++ {
+			if i+1+li >= len(glyphs) {
+				lookaheadOK = false
+				break
+			}
+			covOff := subtableOff + int(readU16BE(f.data, lookaheadCovsOff+li*2))
+			if f.coverageIndex(covOff, glyphs[i+1+li].ID) < 0 {
+				lookaheadOK = false
+				break
+			}
+		}
+		if !lookaheadOK {
+			continue
+		}
+
+		// Substitute.
+		glyphs[i].ID = readU16BE(f.data, substOff+covIdx*2)
+		glyphs[i].Flags |= GlyphFlagGeneratedByGSUB
 	}
 	return glyphs
 }
@@ -806,4 +1495,355 @@ func (f *Font) matchLigatureSet(glyphs []Glyph, pos int, ligSetOff int) (int, Gl
 		}
 	}
 	return 0, Glyph{}
+}
+
+// GPOS ValueFormat bitmask constants.
+const (
+	valueFormatXPlacement       = 1 << 0
+	valueFormatYPlacement       = 1 << 1
+	valueFormatXAdvance         = 1 << 2
+	valueFormatYAdvance         = 1 << 3
+	valueFormatXPlacementDevice = 1 << 4
+	valueFormatYPlacementDevice = 1 << 5
+	valueFormatXAdvanceDevice   = 1 << 6
+	valueFormatYAdvanceDevice   = 1 << 7
+)
+
+// valueRecordSize returns the number of uint16 fields in a value record for the given format.
+func valueRecordSize(format uint16) int {
+	n := 0
+	for format != 0 {
+		n += int(format & 1)
+		format >>= 1
+	}
+	return n
+}
+
+// unpackValueRecord reads a GPOS ValueRecord and applies it to a glyph.
+func unpackValueRecord(data []byte, off int, format uint16, g *Glyph) {
+	if format == 0 {
+		return
+	}
+	at := off
+	if format&valueFormatXPlacement != 0 {
+		if at+2 <= len(data) {
+			g.OffsetX += int32(readS16BE(data, at))
+		}
+		at += 2
+	}
+	if format&valueFormatYPlacement != 0 {
+		if at+2 <= len(data) {
+			g.OffsetY += int32(readS16BE(data, at))
+		}
+		at += 2
+	}
+	if format&valueFormatXAdvance != 0 {
+		if at+2 <= len(data) {
+			g.AdvanceX += int32(readS16BE(data, at))
+		}
+		at += 2
+	}
+	if format&valueFormatYAdvance != 0 {
+		if at+2 <= len(data) {
+			g.AdvanceY += int32(readS16BE(data, at))
+		}
+		at += 2
+	}
+	// Skip device table offsets (4 possible).
+	// We don't apply device adjustments for now.
+}
+
+// findGPOSFeatureIndices returns all indices in the GPOS FeatureList matching a feature tag.
+func (f *Font) findGPOSFeatureIndices(dst []int, tag FeatureTag) []int {
+	te := f.tables[tableGpos]
+	if te.length == 0 {
+		return dst
+	}
+	base := int(te.offset)
+	if base+10 > len(f.data) {
+		return dst
+	}
+	featureListOff := base + int(readU16BE(f.data, base+6))
+	if featureListOff+2 > len(f.data) {
+		return dst
+	}
+	featureCount := int(readU16BE(f.data, featureListOff))
+	if featureListOff+2+featureCount*6 > len(f.data) {
+		return dst
+	}
+	tagU32 := uint32(tag)
+	for i := 0; i < featureCount; i++ {
+		recOff := featureListOff + 2 + i*6
+		ftag := uint32(f.data[recOff]) | uint32(f.data[recOff+1])<<8 | uint32(f.data[recOff+2])<<16 | uint32(f.data[recOff+3])<<24
+		if ftag == tagU32 {
+			dst = append(dst, i)
+		}
+	}
+	return dst
+}
+
+// gposFeatureLookups returns the lookup indices for a GPOS feature by feature index.
+func (f *Font) gposFeatureLookups(featureIndex int) []uint16 {
+	te := f.tables[tableGpos]
+	if te.length == 0 {
+		return nil
+	}
+	base := int(te.offset)
+	if base+10 > len(f.data) {
+		return nil
+	}
+	featureListOff := base + int(readU16BE(f.data, base+6))
+	if featureListOff+2 > len(f.data) {
+		return nil
+	}
+	featureCount := int(readU16BE(f.data, featureListOff))
+	if featureIndex < 0 || featureIndex >= featureCount {
+		return nil
+	}
+	recOff := featureListOff + 2 + featureIndex*6
+	if recOff+6 > len(f.data) {
+		return nil
+	}
+	featureOffset := featureListOff + int(readU16BE(f.data, recOff+4))
+	if featureOffset+4 > len(f.data) {
+		return nil
+	}
+	lookupCount := int(readU16BE(f.data, featureOffset+2))
+	if featureOffset+4+lookupCount*2 > len(f.data) {
+		return nil
+	}
+	lookups := make([]uint16, lookupCount)
+	for i := range lookups {
+		lookups[i] = readU16BE(f.data, featureOffset+4+i*2)
+	}
+	return lookups
+}
+
+// applyGPOSKerning applies GPOS kerning (kern feature, lookup type 2) to glyphs.
+// Modifies glyphs in place.
+func (f *Font) applyGPOSKerning(glyphs []Glyph, disabledFeatures map[FeatureTag]bool) {
+	if disabledFeatures != nil && disabledFeatures[FeatureTagKern] {
+		return
+	}
+	te := f.tables[tableGpos]
+	if te.length == 0 {
+		return
+	}
+	base := int(te.offset)
+	if base+10 > len(f.data) {
+		return
+	}
+	lookupListOff := base + int(readU16BE(f.data, base+8))
+	if lookupListOff+2 > len(f.data) {
+		return
+	}
+	lookupCount := int(readU16BE(f.data, lookupListOff))
+
+	var idxBuf [4]int
+	featureIndices := f.findGPOSFeatureIndices(idxBuf[:0], FeatureTagKern)
+	if len(featureIndices) == 0 {
+		return
+	}
+
+	for _, fi := range featureIndices {
+		lookupIndices := f.gposFeatureLookups(fi)
+		for _, li := range lookupIndices {
+			if int(li) >= lookupCount {
+				continue
+			}
+			lookupOff := lookupListOff + int(readU16BE(f.data, lookupListOff+2+int(li)*2))
+			f.applyGPOSLookup(glyphs, lookupOff)
+		}
+	}
+}
+
+// applyGPOSLookup applies a single GPOS lookup to glyphs.
+func (f *Font) applyGPOSLookup(glyphs []Glyph, lookupOff int) {
+	if lookupOff+6 > len(f.data) {
+		return
+	}
+	lookupType := readU16BE(f.data, lookupOff)
+	subtableCount := int(readU16BE(f.data, lookupOff+4))
+	if lookupOff+6+subtableCount*2 > len(f.data) {
+		return
+	}
+
+	for si := 0; si < subtableCount; si++ {
+		subtableOff := lookupOff + int(readU16BE(f.data, lookupOff+6+si*2))
+		switch lookupType {
+		case 1:
+			f.applyGPOSSingleAdjust(glyphs, subtableOff)
+		case 2:
+			f.applyGPOSPairAdjust(glyphs, subtableOff)
+		case 9:
+			f.applyGPOSExtension(glyphs, subtableOff)
+		}
+	}
+}
+
+// applyGPOSExtension handles GPOS type 9 (extension positioning).
+func (f *Font) applyGPOSExtension(glyphs []Glyph, subtableOff int) {
+	if subtableOff+8 > len(f.data) {
+		return
+	}
+	format := readU16BE(f.data, subtableOff)
+	if format != 1 {
+		return
+	}
+	extLookupType := readU16BE(f.data, subtableOff+2)
+	extOffset := int(readU32BE(f.data, subtableOff+4))
+	realOff := subtableOff + extOffset
+
+	switch extLookupType {
+	case 1:
+		f.applyGPOSSingleAdjust(glyphs, realOff)
+	case 2:
+		f.applyGPOSPairAdjust(glyphs, realOff)
+	}
+}
+
+// applyGPOSSingleAdjust applies GPOS type 1 (single adjustment).
+func (f *Font) applyGPOSSingleAdjust(glyphs []Glyph, subtableOff int) {
+	if subtableOff+6 > len(f.data) {
+		return
+	}
+	format := readU16BE(f.data, subtableOff)
+	coverageOff := subtableOff + int(readU16BE(f.data, subtableOff+2))
+	valueFormat := readU16BE(f.data, subtableOff+4)
+	vrSize := valueRecordSize(valueFormat)
+
+	switch format {
+	case 1:
+		// Single value record applied to all covered glyphs.
+		vrOff := subtableOff + 6
+		if vrOff+vrSize*2 > len(f.data) {
+			return
+		}
+		for i := range glyphs {
+			if f.coverageIndex(coverageOff, glyphs[i].ID) >= 0 {
+				unpackValueRecord(f.data, vrOff, valueFormat, &glyphs[i])
+				glyphs[i].Flags |= GlyphFlagUsedInGPOS
+			}
+		}
+	case 2:
+		// Per-glyph value records indexed by coverage index.
+		recordCount := int(readU16BE(f.data, subtableOff+6))
+		vrOff := subtableOff + 8
+		if vrOff+recordCount*vrSize*2 > len(f.data) {
+			return
+		}
+		for i := range glyphs {
+			covIdx := f.coverageIndex(coverageOff, glyphs[i].ID)
+			if covIdx >= 0 && covIdx < recordCount {
+				unpackValueRecord(f.data, vrOff+covIdx*vrSize*2, valueFormat, &glyphs[i])
+				glyphs[i].Flags |= GlyphFlagUsedInGPOS
+			}
+		}
+	}
+}
+
+// applyGPOSPairAdjust applies GPOS type 2 (pair adjustment / kerning).
+func (f *Font) applyGPOSPairAdjust(glyphs []Glyph, subtableOff int) {
+	if subtableOff+10 > len(f.data) {
+		return
+	}
+	format := readU16BE(f.data, subtableOff)
+	coverageOff := subtableOff + int(readU16BE(f.data, subtableOff+2))
+	valueFormat1 := readU16BE(f.data, subtableOff+4)
+	valueFormat2 := readU16BE(f.data, subtableOff+6)
+	size1 := valueRecordSize(valueFormat1)
+	size2 := valueRecordSize(valueFormat2)
+
+	switch format {
+	case 1:
+		f.applyPairAdjustFormat1(glyphs, subtableOff, coverageOff, valueFormat1, valueFormat2, size1, size2)
+	case 2:
+		f.applyPairAdjustFormat2(glyphs, subtableOff, coverageOff, valueFormat1, valueFormat2, size1, size2)
+	}
+}
+
+// applyPairAdjustFormat1 implements GPOS pair adjustment format 1 (individual pairs).
+func (f *Font) applyPairAdjustFormat1(glyphs []Glyph, subtableOff int, coverageOff int, vf1, vf2 uint16, size1, size2 int) {
+	setCount := int(readU16BE(f.data, subtableOff+8))
+	if subtableOff+10+setCount*2 > len(f.data) {
+		return
+	}
+
+	for i := 0; i < len(glyphs)-1; i++ {
+		covIdx := f.coverageIndex(coverageOff, glyphs[i].ID)
+		if covIdx < 0 || covIdx >= setCount {
+			continue
+		}
+		pairSetOff := subtableOff + int(readU16BE(f.data, subtableOff+10+covIdx*2))
+		if pairSetOff+2 > len(f.data) {
+			continue
+		}
+		pairCount := int(readU16BE(f.data, pairSetOff))
+		pairRecordSize := 1 + size1 + size2 // SecondGlyph(1 u16) + vr1 + vr2
+		recordsOff := pairSetOff + 2
+		if recordsOff+pairCount*pairRecordSize*2 > len(f.data) {
+			continue
+		}
+
+		nextGlyphID := glyphs[i+1].ID
+		// Binary search for the pair.
+		lo, hi := 0, pairCount-1
+		for lo <= hi {
+			mid := (lo + hi) / 2
+			recOff := recordsOff + mid*pairRecordSize*2
+			secondGlyph := readU16BE(f.data, recOff)
+			if nextGlyphID < secondGlyph {
+				hi = mid - 1
+			} else if nextGlyphID > secondGlyph {
+				lo = mid + 1
+			} else {
+				// Found pair — apply value records.
+				vrOff := recOff + 2
+				unpackValueRecord(f.data, vrOff, vf1, &glyphs[i])
+				glyphs[i].Flags |= GlyphFlagUsedInGPOS
+				if vf2 != 0 {
+					unpackValueRecord(f.data, vrOff+size1*2, vf2, &glyphs[i+1])
+					glyphs[i+1].Flags |= GlyphFlagUsedInGPOS
+				}
+				break
+			}
+		}
+	}
+}
+
+// applyPairAdjustFormat2 implements GPOS pair adjustment format 2 (class-based pairs).
+func (f *Font) applyPairAdjustFormat2(glyphs []Glyph, subtableOff int, coverageOff int, vf1, vf2 uint16, size1, size2 int) {
+	if subtableOff+16 > len(f.data) {
+		return
+	}
+	classDef1Off := subtableOff + int(readU16BE(f.data, subtableOff+8))
+	classDef2Off := subtableOff + int(readU16BE(f.data, subtableOff+10))
+	class1Count := int(readU16BE(f.data, subtableOff+12))
+	class2Count := int(readU16BE(f.data, subtableOff+14))
+
+	pairRecordSize := size1 + size2
+	recordsOff := subtableOff + 16
+	totalRecords := class1Count * class2Count * pairRecordSize * 2
+	if recordsOff+totalRecords > len(f.data) {
+		return
+	}
+
+	for i := 0; i < len(glyphs)-1; i++ {
+		covIdx := f.coverageIndex(coverageOff, glyphs[i].ID)
+		if covIdx < 0 {
+			continue
+		}
+		class1 := int(classDefLookup(f.data, classDef1Off, glyphs[i].ID))
+		class2 := int(classDefLookup(f.data, classDef2Off, glyphs[i+1].ID))
+		if class1 >= class1Count || class2 >= class2Count {
+			continue
+		}
+		vrOff := recordsOff + (class1*class2Count+class2)*pairRecordSize*2
+		unpackValueRecord(f.data, vrOff, vf1, &glyphs[i])
+		glyphs[i].Flags |= GlyphFlagUsedInGPOS
+		if vf2 != 0 {
+			unpackValueRecord(f.data, vrOff+size1*2, vf2, &glyphs[i+1])
+			glyphs[i+1].Flags |= GlyphFlagUsedInGPOS
+		}
+	}
 }
