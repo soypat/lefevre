@@ -34,6 +34,9 @@ var tables = []tableSpec{
 	{"kbts__UnicodeFlags_Data", "unicodeFlagsData", "uint8", "unicode flags data"},
 	{"kbts__UnicodeMirrorCodepoint_PageIndices", "mirrorCodepointPageIndices", "uint8", "mirror codepoint page indices"},
 	{"kbts__UnicodeMirrorCodepoint_Data", "mirrorCodepointData", "uint32", "mirror codepoint data"},
+	// Arabic joining type tables
+	{"kbts__UnicodeJoiningType_PageIndices", "joiningTypePageIndices", "uint8", "Arabic joining type page indices"},
+	{"kbts__UnicodeJoiningType_Data", "joiningTypeData", "uint8", "Arabic joining type data"},
 }
 
 // Also extract: kbts__ScriptExtensions array and kbts_GraphemeBreakTransition table.

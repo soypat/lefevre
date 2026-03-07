@@ -7,3 +7,11 @@
 
 This is a Go rewrite of [kb_text_shape.h](https://github.com/JimmyLefevre/kb) (v2.14, by Jimmy Lefevre), a 28K-line single-header C library for Unicode text segmentation and OpenType shaping.
 
+
+Below is the result of running
+
+```
+echo "مرحبا hello, office" | go run ./examples/visual/ testdata/DejaVuSans.ttf > lefevre.svg
+```
+
+![Visualization example.](./lefevre.svg)

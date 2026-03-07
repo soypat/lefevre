@@ -740,6 +740,240 @@ var defaultGSUBFeatures = [...]FeatureTag{
 	FeatureTagLiga, // Standard ligatures
 }
 
+// arabicGSUBFeatures is the feature set for the Arabic shaper.
+// Applied after joining form assignment: ccmp, locl, then joining features, then ligatures.
+var arabicGSUBFeatures = [...]FeatureTag{
+	FeatureTagCcmp, // Glyph composition/decomposition
+	FeatureTagLocl, // Localized forms
+}
+
+// arabicJoiningFeatures maps joiningFeature values to their GSUB feature tags.
+// Applied in order: isol, fina, fin2, fin3, medi, med2, init.
+var arabicJoiningFeatures = [...]struct {
+	feature joiningFeature
+	tag     FeatureTag
+}{
+	{joiningFeatureIsol, FeatureTagIsol},
+	{joiningFeatureFina, FeatureTagFina},
+	{joiningFeatureFin2, FeatureTagFin2},
+	{joiningFeatureFin3, FeatureTagFin3},
+	{joiningFeatureMedi, FeatureTagMedi},
+	{joiningFeatureMed2, FeatureTagMed2},
+	{joiningFeatureInit, FeatureTagInit},
+}
+
+// arabicPostJoiningFeatures are applied after joining features.
+var arabicPostJoiningFeatures = [...]FeatureTag{
+	FeatureTagRlig, // Required ligatures
+	FeatureTagRclt, // Required contextual alternates
+	FeatureTagCalt, // Contextual alternates
+	FeatureTagLiga, // Standard ligatures
+}
+
+// joiningFeatureToGlyphFlag converts a joiningFeature to the corresponding GlyphFlags bit.
+func joiningFeatureToGlyphFlag(jf joiningFeature) GlyphFlags {
+	if jf == joiningFeatureNone {
+		return 0
+	}
+	return 1 << (jf - 1) // isol=bit0, fina=bit1, ... matches GlyphFlag enum order
+}
+
+// joiningFeatureMask is the set of all joining feature glyph flags.
+const joiningFeatureMask = GlyphFlagIsol | GlyphFlagFina | GlyphFlagFin2 | GlyphFlagFin3 |
+	GlyphFlagMedi | GlyphFlagMed2 | GlyphFlagInit
+
+// assignJoiningForms assigns Arabic joining forms (isol/init/medi/fina) to glyphs
+// based on their Unicode Joining_Type property and neighboring glyphs.
+//
+// The algorithm mirrors the C implementation (KBTS__OP_KIND_FLAG_JOINING_LETTERS):
+//   - Skip transparent glyphs (marks)
+//   - For each non-transparent glyph, check if it can join with the previous non-transparent glyph
+//   - Use a transition table to update the previous glyph's form when a join occurs
+func assignJoiningForms(glyphs []Glyph) {
+	// canJoinRight is a bitmask: for a given previous joining type (byte index),
+	// bit positions indicate which current joining types can join.
+	// Left, Dual, and Force types can join to the right of Right, Dual, and Force types.
+	const canJoinRight = (1<<joiningTypeRight | 1<<joiningTypeDual | 1<<joiningTypeForce) << (8 * joiningTypeLeft) |
+		(1<<joiningTypeRight | 1<<joiningTypeDual | 1<<joiningTypeForce) << (8 * joiningTypeDual) |
+		(1<<joiningTypeRight | 1<<joiningTypeDual | 1<<joiningTypeForce) << (8 * joiningTypeForce)
+
+	// transition maps a glyph's current joining feature to its new form when
+	// a following glyph joins to it: isol→init, fina→medi.
+	const transition = uint64(joiningFeatureInit)<<(8*joiningFeatureIsol) |
+		uint64(joiningFeatureMedi)<<(8*joiningFeatureFina) |
+		uint64(joiningFeatureMedi)<<(8*joiningFeatureMedi) |
+		uint64(joiningFeatureMed2)<<(8*joiningFeatureMed2)
+
+	prevIdx := -1 // index of previous non-transparent glyph
+	var prevJT joiningType
+
+	for i := range glyphs {
+		jt := getJoiningType(glyphs[i].Codepoint)
+		if jt == joiningTypeTransparent {
+			continue
+		}
+
+		var jf joiningFeature
+		if prevIdx >= 0 && canJoinRight&(1<<uint(jt+8*prevJT)) != 0 {
+			// Join succeeds: update previous glyph's form via transition table.
+			prevJF := joiningFeature((transition >> (8 * uint(glyphs[prevIdx].joiningFeature))) & 0xFF)
+			glyphs[prevIdx].joiningFeature = prevJF
+			glyphs[prevIdx].Flags = (glyphs[prevIdx].Flags &^ joiningFeatureMask) | joiningFeatureToGlyphFlag(prevJF)
+
+			// Current glyph gets final form.
+			jf = joiningFeatureFina
+		} else {
+			// No join: current glyph gets isolated form.
+			jf = joiningFeatureIsol
+		}
+
+		glyphs[i].joiningFeature = jf
+		glyphs[i].Flags = (glyphs[i].Flags &^ joiningFeatureMask) | joiningFeatureToGlyphFlag(jf)
+
+		prevIdx = i
+		prevJT = jt
+	}
+}
+
+// applyArabicShaping runs the full Arabic shaping pipeline on glyphs:
+// 1. Assign joining forms based on neighbors
+// 2. Apply ccmp/locl GSUB features
+// 3. Apply joining GSUB features (isol/fina/medi/init) filtered by each glyph's joining form flag
+// 4. Apply post-joining GSUB features (rlig/rclt/calt/liga)
+func (f *Font) applyArabicShaping(glyphs []Glyph, disabledFeatures map[FeatureTag]bool) []Glyph {
+	assignJoiningForms(glyphs)
+
+	// Phase 1: ccmp/locl.
+	glyphs = f.applyGSUBFeatures(glyphs, arabicGSUBFeatures[:], disabledFeatures)
+
+	// Phase 2: joining features, filtered by glyph flag.
+	for _, jf := range arabicJoiningFeatures {
+		if disabledFeatures != nil && disabledFeatures[jf.tag] {
+			continue
+		}
+		requiredFlag := joiningFeatureToGlyphFlag(jf.feature)
+		glyphs = f.applyGSUBFeaturesFiltered(glyphs, jf.tag, disabledFeatures, requiredFlag)
+	}
+
+	// Phase 3: post-joining features.
+	glyphs = f.applyGSUBFeatures(glyphs, arabicPostJoiningFeatures[:], disabledFeatures)
+
+	return glyphs
+}
+
+// applyGSUBFeaturesFiltered applies a single GSUB feature, but only substitutes
+// glyphs whose Flags contain requiredFlag. Used for Arabic joining features.
+// Only single substitution (type 1) is filtered; other lookup types apply normally.
+func (f *Font) applyGSUBFeaturesFiltered(glyphs []Glyph, tag FeatureTag, disabledFeatures map[FeatureTag]bool, requiredFlag GlyphFlags) []Glyph {
+	if disabledFeatures != nil && disabledFeatures[tag] {
+		return glyphs
+	}
+	te := f.tables[tableGsub]
+	if te.length == 0 {
+		return glyphs
+	}
+	base := int(te.offset)
+	if base+10 > len(f.data) {
+		return glyphs
+	}
+	lookupListOff := base + int(readU16BE(f.data, base+8))
+	if lookupListOff+2 > len(f.data) {
+		return glyphs
+	}
+	lookupCount := int(readU16BE(f.data, lookupListOff))
+
+	var idxBuf [4]int
+	featureIndices := f.findGSUBFeatureIndices(idxBuf[:0], tag)
+	for _, fi := range featureIndices {
+		lookupIndices := f.gsubFeatureLookups(fi)
+		for _, li := range lookupIndices {
+			if int(li) >= lookupCount {
+				continue
+			}
+			lookupOff := lookupListOff + int(readU16BE(f.data, lookupListOff+2+int(li)*2))
+			glyphs = f.applyGSUBLookupFiltered(glyphs, lookupOff, requiredFlag)
+		}
+	}
+	return glyphs
+}
+
+// applyGSUBLookupFiltered applies a single GSUB lookup, but only to glyphs
+// whose Flags contain requiredFlag. For type 1 (single substitution),
+// non-matching glyphs are skipped. Other types apply normally.
+func (f *Font) applyGSUBLookupFiltered(glyphs []Glyph, lookupOff int, requiredFlag GlyphFlags) []Glyph {
+	if lookupOff+6 > len(f.data) {
+		return glyphs
+	}
+	lookupType := readU16BE(f.data, lookupOff)
+	subtableCount := int(readU16BE(f.data, lookupOff+4))
+	if lookupOff+6+subtableCount*2 > len(f.data) {
+		return glyphs
+	}
+
+	for si := 0; si < subtableCount; si++ {
+		subtableOff := lookupOff + int(readU16BE(f.data, lookupOff+6+si*2))
+		switch lookupType {
+		case 1:
+			glyphs = f.applySingleSubstFiltered(glyphs, subtableOff, requiredFlag)
+		case 7:
+			// Extension: resolve inner lookup type and apply filtered if type 1.
+			if subtableOff+8 > len(f.data) {
+				continue
+			}
+			innerType := readU16BE(f.data, subtableOff+2)
+			innerOff := subtableOff + int(readU32BE(f.data, subtableOff+4))
+			if innerType == 1 {
+				glyphs = f.applySingleSubstFiltered(glyphs, innerOff, requiredFlag)
+			} else {
+				// For non-single-subst extension lookups, apply unfiltered.
+				glyphs = f.applyGSUBLookup(glyphs, lookupOff)
+			}
+		default:
+			// Non-single-subst lookups: apply unfiltered.
+			glyphs = f.applyGSUBLookup(glyphs, lookupOff)
+		}
+	}
+	return glyphs
+}
+
+// applySingleSubstFiltered applies GSUB type 1 only to glyphs with requiredFlag set.
+func (f *Font) applySingleSubstFiltered(glyphs []Glyph, subtableOff int, requiredFlag GlyphFlags) []Glyph {
+	if subtableOff+6 > len(f.data) {
+		return glyphs
+	}
+	format := readU16BE(f.data, subtableOff)
+	coverageOff := subtableOff + int(readU16BE(f.data, subtableOff+2))
+
+	switch format {
+	case 1:
+		deltaGlyphID := int16(readU16BE(f.data, subtableOff+4))
+		for i := range glyphs {
+			if glyphs[i].Flags&requiredFlag == 0 {
+				continue
+			}
+			covIdx := f.coverageIndex(coverageOff, glyphs[i].ID)
+			if covIdx >= 0 {
+				glyphs[i].ID = uint16(int32(glyphs[i].ID) + int32(deltaGlyphID))
+				glyphs[i].Flags |= GlyphFlagGeneratedByGSUB
+			}
+		}
+	case 2:
+		glyphCount := int(readU16BE(f.data, subtableOff+4))
+		for i := range glyphs {
+			if glyphs[i].Flags&requiredFlag == 0 {
+				continue
+			}
+			covIdx := f.coverageIndex(coverageOff, glyphs[i].ID)
+			if covIdx >= 0 && covIdx < glyphCount {
+				newID := readU16BE(f.data, subtableOff+6+covIdx*2)
+				glyphs[i].ID = newID
+				glyphs[i].Flags |= GlyphFlagGeneratedByGSUB
+			}
+		}
+	}
+	return glyphs
+}
+
 // applyGSUBFeatures applies GSUB substitutions for a set of features.
 // disabledFeatures is a set of feature tags that have been disabled via overrides.
 func (f *Font) applyGSUBFeatures(glyphs []Glyph, features []FeatureTag, disabledFeatures map[FeatureTag]bool) []Glyph {

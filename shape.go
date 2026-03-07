@@ -126,8 +126,12 @@ func (cfg *ShapeConfig) Shape(dst []Run, text string, breaks []Break) []Run {
 	}
 
 	emitRun := func(glyphs []Glyph, props runProps) Run {
-		// Apply standard GSUB features.
-		glyphs = f.applyGSUBFeatures(glyphs, defaultGSUBFeatures[:], disabledFeatures)
+		// Apply GSUB features: use Arabic shaper for Arabic-family scripts.
+		if props.script.Shaper() == ShaperArabic {
+			glyphs = f.applyArabicShaping(glyphs, disabledFeatures)
+		} else {
+			glyphs = f.applyGSUBFeatures(glyphs, defaultGSUBFeatures[:], disabledFeatures)
+		}
 
 		// Recompute advances after substitution (ligature glyphs have different advances).
 		for i := range glyphs {

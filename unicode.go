@@ -188,6 +188,32 @@ const (
 	gbsb1toSKIP                       graphemeBreakState = 28
 )
 
+// joiningType represents the Unicode Arabic Joining_Type property.
+type joiningType uint8
+
+const (
+	joiningTypeNone        joiningType = 0 // Non_Joining
+	joiningTypeLeft        joiningType = 1 // Left_Joining
+	joiningTypeDual        joiningType = 2 // Dual_Joining
+	joiningTypeForce       joiningType = 3 // Join_Causing (e.g., ZWJ)
+	joiningTypeRight       joiningType = 4 // Right_Joining
+	joiningTypeTransparent joiningType = 5 // Transparent (marks)
+)
+
+func getJoiningType(cp rune) joiningType {
+	u := uint32(cp)
+	if u >= 1114110 {
+		return 0
+	}
+	var page uint32
+	if u < 918016 {
+		page = uint32(joiningTypePageIndices[u/128]) * 128
+	} else {
+		page = 0
+	}
+	return joiningType(joiningTypeData[page|(u&127)])
+}
+
 // unicodeFlag bits from kbts_unicode_flags.
 const (
 	unicodeFlagModifierCombiningMark uint8 = 1 << 0

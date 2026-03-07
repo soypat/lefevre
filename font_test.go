@@ -1316,3 +1316,180 @@ func buildAlternateSubst(t *testing.T, covGlyphs []uint16, altSets [][]uint16) [
 	b = append(b, cov...)
 	return b
 }
+
+// --- Arabic joining tests ---
+
+func TestJoiningTypeLookup(t *testing.T) {
+	// Arabic letters should have non-zero joining types.
+	tests := []struct {
+		r    rune
+		want joiningType
+	}{
+		{'\u0628', joiningTypeDual},   // Ba (dual joining)
+		{'\u062D', joiningTypeDual},   // Haa (dual joining)
+		{'\u0627', joiningTypeRight},  // Alef (right joining)
+		{'\u062F', joiningTypeRight},  // Dal (right joining)
+		{'\u0020', joiningTypeNone},   // Space (non-joining)
+		{'A', joiningTypeNone},        // Latin A (non-joining)
+		{'\u0640', joiningTypeForce},  // Tatweel (join-causing)
+		{'\u064B', joiningTypeTransparent}, // Fathatan (transparent mark)
+	}
+	for _, tc := range tests {
+		got := getJoiningType(tc.r)
+		if got != tc.want {
+			t.Errorf("getJoiningType(U+%04X) = %d, want %d", tc.r, got, tc.want)
+		}
+	}
+}
+
+func TestAssignJoiningForms(t *testing.T) {
+	// "بحر" (ba-haa-ra): all dual-joining → init-medi-fina.
+	glyphs := []Glyph{
+		{Codepoint: '\u0628'}, // Ba
+		{Codepoint: '\u062D'}, // Haa
+		{Codepoint: '\u0631'}, // Ra (right-joining)
+	}
+	assignJoiningForms(glyphs)
+
+	// Ba should be initial (has a following dual-joiner).
+	if glyphs[0].joiningFeature != joiningFeatureInit {
+		t.Errorf("glyph[0] (Ba) joiningFeature = %d, want init (%d)", glyphs[0].joiningFeature, joiningFeatureInit)
+	}
+	if !glyphs[0].Flags.Has(GlyphFlagInit) {
+		t.Error("glyph[0] (Ba) missing GlyphFlagInit")
+	}
+
+	// Haa should be medial (between two joiners).
+	if glyphs[1].joiningFeature != joiningFeatureMedi {
+		t.Errorf("glyph[1] (Haa) joiningFeature = %d, want medi (%d)", glyphs[1].joiningFeature, joiningFeatureMedi)
+	}
+	if !glyphs[1].Flags.Has(GlyphFlagMedi) {
+		t.Error("glyph[1] (Haa) missing GlyphFlagMedi")
+	}
+
+	// Ra should be final (right-joining, preceded by a joiner).
+	if glyphs[2].joiningFeature != joiningFeatureFina {
+		t.Errorf("glyph[2] (Ra) joiningFeature = %d, want fina (%d)", glyphs[2].joiningFeature, joiningFeatureFina)
+	}
+	if !glyphs[2].Flags.Has(GlyphFlagFina) {
+		t.Error("glyph[2] (Ra) missing GlyphFlagFina")
+	}
+}
+
+func TestAssignJoiningFormsIsolated(t *testing.T) {
+	// Single character should be isolated.
+	glyphs := []Glyph{{Codepoint: '\u0628'}} // Ba alone
+	assignJoiningForms(glyphs)
+
+	if glyphs[0].joiningFeature != joiningFeatureIsol {
+		t.Errorf("glyph[0] (Ba) joiningFeature = %d, want isol (%d)", glyphs[0].joiningFeature, joiningFeatureIsol)
+	}
+	if !glyphs[0].Flags.Has(GlyphFlagIsol) {
+		t.Error("glyph[0] (Ba) missing GlyphFlagIsol")
+	}
+}
+
+func TestAssignJoiningFormsWithSpace(t *testing.T) {
+	// "ب ب" (ba space ba): space breaks joining → both isolated.
+	glyphs := []Glyph{
+		{Codepoint: '\u0628'}, // Ba
+		{Codepoint: ' '},      // Space (non-joining)
+		{Codepoint: '\u0628'}, // Ba
+	}
+	assignJoiningForms(glyphs)
+
+	if glyphs[0].joiningFeature != joiningFeatureIsol {
+		t.Errorf("glyph[0] (Ba) joiningFeature = %d, want isol (%d)", glyphs[0].joiningFeature, joiningFeatureIsol)
+	}
+	if glyphs[2].joiningFeature != joiningFeatureIsol {
+		t.Errorf("glyph[2] (Ba) joiningFeature = %d, want isol (%d)", glyphs[2].joiningFeature, joiningFeatureIsol)
+	}
+}
+
+func TestAssignJoiningFormsTransparent(t *testing.T) {
+	// "بَب" (ba + fatha + ba): fatha is transparent, shouldn't break joining.
+	glyphs := []Glyph{
+		{Codepoint: '\u0628'}, // Ba (dual)
+		{Codepoint: '\u064E'}, // Fatha (transparent mark)
+		{Codepoint: '\u0628'}, // Ba (dual)
+	}
+	assignJoiningForms(glyphs)
+
+	// Ba should be init (transparent mark doesn't break the join).
+	if glyphs[0].joiningFeature != joiningFeatureInit {
+		t.Errorf("glyph[0] (Ba) joiningFeature = %d, want init (%d)", glyphs[0].joiningFeature, joiningFeatureInit)
+	}
+	// Last Ba should be fina.
+	if glyphs[2].joiningFeature != joiningFeatureFina {
+		t.Errorf("glyph[2] (Ba) joiningFeature = %d, want fina (%d)", glyphs[2].joiningFeature, joiningFeatureFina)
+	}
+}
+
+func TestAssignJoiningFormsRightJoining(t *testing.T) {
+	// "دب" (dal + ba): dal is right-joining, ba is dual-joining.
+	// Dal can only join on the right, so: dal=fina, ba=isol? No...
+	// dal (right) preceded by nothing → isol. ba follows dal but dal can't join left → ba=isol.
+	// Actually: dal=right-joining means it joins to what comes BEFORE (right side in RTL).
+	// With nothing before dal: dal=isol. ba after dal: dal can't join to ba (no left join) → ba=isol.
+	glyphs := []Glyph{
+		{Codepoint: '\u062F'}, // Dal (right-joining)
+		{Codepoint: '\u0628'}, // Ba (dual-joining)
+	}
+	assignJoiningForms(glyphs)
+
+	// Dal: right-joining, nothing before → isolated.
+	if glyphs[0].joiningFeature != joiningFeatureIsol {
+		t.Errorf("glyph[0] (Dal) joiningFeature = %d, want isol (%d)", glyphs[0].joiningFeature, joiningFeatureIsol)
+	}
+	// Ba: dual-joining, but dal before can't join left → isolated.
+	if glyphs[1].joiningFeature != joiningFeatureIsol {
+		t.Errorf("glyph[1] (Ba) joiningFeature = %d, want isol (%d)", glyphs[1].joiningFeature, joiningFeatureIsol)
+	}
+}
+
+func TestAssignJoiningFormsBaDal(t *testing.T) {
+	// "بد" (ba + dal): ba=dual, dal=right.
+	// ba can join right (to dal) and dal accepts left joining from ba.
+	// So: ba=init (joins right), dal=fina (joins to what comes before).
+	glyphs := []Glyph{
+		{Codepoint: '\u0628'}, // Ba (dual-joining)
+		{Codepoint: '\u062F'}, // Dal (right-joining)
+	}
+	assignJoiningForms(glyphs)
+
+	if glyphs[0].joiningFeature != joiningFeatureInit {
+		t.Errorf("glyph[0] (Ba) joiningFeature = %d, want init (%d)", glyphs[0].joiningFeature, joiningFeatureInit)
+	}
+	if glyphs[1].joiningFeature != joiningFeatureFina {
+		t.Errorf("glyph[1] (Dal) joiningFeature = %d, want fina (%d)", glyphs[1].joiningFeature, joiningFeatureFina)
+	}
+}
+
+func TestArabicShapingEndToEnd(t *testing.T) {
+	f := loadTestFont(t)
+	// Shape Arabic text "مرحبا" and verify joining forms are assigned.
+	text := "مرحبا"
+	var cfg ShapeConfig
+	cfg.Font = f
+
+	runs := cfg.ShapeSimple(nil, text, DirectionRTL)
+	if len(runs) == 0 {
+		t.Fatal("no runs produced")
+	}
+	run := runs[0]
+	if len(run.Glyphs) == 0 {
+		t.Fatal("no glyphs in run")
+	}
+
+	// At least some glyphs should have joining feature flags set.
+	hasJoiningFlag := false
+	for _, g := range run.Glyphs {
+		if g.Flags&joiningFeatureMask != 0 {
+			hasJoiningFlag = true
+			break
+		}
+	}
+	if !hasJoiningFlag {
+		t.Error("no glyphs have Arabic joining flags set; assignJoiningForms not working")
+	}
+}
