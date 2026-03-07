@@ -28,6 +28,7 @@ func (d Direction) Reverse() Direction {
 	}
 }
 
+// String returns "LTR", "RTL", or "Unknown".
 func (d Direction) String() string {
 	switch d {
 	case DirectionLTR:
@@ -119,6 +120,7 @@ const (
 	ShaperUSE
 )
 
+// String returns the shaper name.
 func (s Shaper) String() string {
 	switch s {
 	case ShaperDefault:
@@ -188,6 +190,7 @@ const (
 	ShapeErrorOutOfMemory
 )
 
+// Error implements the error interface.
 func (e ShapeError) Error() string {
 	switch e {
 	case ShapeErrorNone:
@@ -349,6 +352,9 @@ const (
 	BreakConfigEndOfTextGeneratesHardBreak BreakConfigFlags = 1
 )
 
+// Breaker is a high-level streaming text segmenter.
+// Feed text via AppendBreak, then call End to flush remaining breaks.
+// The zero value is ready to use with default settings.
 type Breaker struct {
 	Direction Direction
 	JStyle    JapaneseLineBreakStyle

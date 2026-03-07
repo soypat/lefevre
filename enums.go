@@ -1,5 +1,6 @@
 package lefevre
 
+// Script identifies a Unicode script (e.g., Latin, Arabic, Devanagari).
 type Script uint8
 
 const (
@@ -176,6 +177,7 @@ const (
 	scriptCount
 )
 
+// String returns the four-character ISO 15924 script tag (e.g., "latn", "arab").
 func (s Script) String() string {
 	tag := s.Tag()
 	if tag == ScriptTagUnknown {
@@ -184,6 +186,7 @@ func (s Script) String() string {
 	return string([]byte{byte(tag), byte(tag >> 8), byte(tag >> 16), byte(tag >> 24)})
 }
 
+// Direction returns the natural text direction for this script (LTR or RTL).
 func (s Script) Direction() Direction {
 	if s == ScriptArabic || s == ScriptHebrew {
 		return DirectionRTL
@@ -191,6 +194,7 @@ func (s Script) Direction() Direction {
 	return DirectionLTR
 }
 
+// IsComplex reports whether this script requires a complex shaping engine.
 func (s Script) IsComplex() bool {
 	if s >= scriptCount {
 		return false
@@ -198,6 +202,7 @@ func (s Script) IsComplex() bool {
 	return scriptProps[s].Shaper != ShaperDefault
 }
 
+// Tag returns the ISO 15924 four-character tag for this script.
 func (s Script) Tag() ScriptTag {
 	if s >= scriptCount {
 		return ScriptTagUnknown
@@ -205,6 +210,7 @@ func (s Script) Tag() ScriptTag {
 	return scriptProps[s].Tag
 }
 
+// Shaper returns the shaping engine required for this script.
 func (s Script) Shaper() Shaper {
 	if s >= scriptCount {
 		return ShaperDefault
@@ -212,6 +218,7 @@ func (s Script) Shaper() Shaper {
 	return scriptProps[s].Shaper
 }
 
+// ScriptTag is a four-character ISO 15924 script identifier stored as a little-endian uint32.
 type ScriptTag uint32
 
 const (
@@ -565,6 +572,7 @@ var scriptProps = [scriptCount]scriptProperties{
 	{ScriptTagZanabazarSquare, ShaperUSE},
 }
 
+// FeatureTag is an OpenType feature tag stored as a little-endian uint32 (e.g., "liga", "kern").
 type FeatureTag uint32
 
 const (
