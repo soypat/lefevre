@@ -1493,3 +1493,225 @@ func TestArabicShapingEndToEnd(t *testing.T) {
 		t.Error("no glyphs have Arabic joining flags set; assignJoiningForms not working")
 	}
 }
+
+// --- GPOS mark positioning tests ---
+
+// TestGPOSMarkToBase tests that GPOS type 4 (mark-to-base) positions combining
+// marks with non-zero offsets. Without type 4, marks remain at offset (0,0)
+// and stack on top of the base glyph's origin instead of being placed above/below.
+func TestGPOSMarkToBase(t *testing.T) {
+	f := loadTestFont(t)
+
+	// "A" + combining grave accent (U+0300).
+	// The mark feature should position the grave above the A via anchor points.
+	text := "A\u0300"
+	var cfg ShapeConfig
+	cfg.Font = f
+	runs := cfg.ShapeSimple(nil, text, DirectionLTR)
+	if len(runs) == 0 || len(runs[0].Glyphs) < 2 {
+		t.Fatal("expected at least 2 glyphs")
+	}
+
+	var base, mark Glyph
+	for _, g := range runs[0].Glyphs {
+		if g.Codepoint == 'A' {
+			base = g
+		}
+		if g.Codepoint == 0x0300 {
+			mark = g
+		}
+	}
+	if mark.ID == 0 {
+		t.Fatal("combining grave accent not found in output")
+	}
+
+	// Mark-to-base should set a negative OffsetX on the mark (positioning it
+	// back over the base glyph) and a positive OffsetY (positioning it above).
+	// Without GPOS type 4, both offsets remain zero.
+	if mark.OffsetX == 0 && mark.OffsetY == 0 {
+		t.Error("mark glyph (U+0300) has zero offsets; GPOS mark-to-base positioning not applied")
+	}
+
+	// The base glyph should have normal advance; mark should not alter it.
+	if base.AdvanceX == 0 {
+		t.Error("base glyph 'A' has zero advance")
+	}
+
+	// The mark should have GlyphFlagUsedInGPOS set.
+	if !mark.Flags.Has(GlyphFlagUsedInGPOS) {
+		t.Error("mark glyph missing GlyphFlagUsedInGPOS")
+	}
+}
+
+// TestGPOSMarkToBaseDifferentMarks verifies that different combining marks get
+// different positioning. A grave accent (U+0300) and a cedilla (U+0327) should
+// have different OffsetY since one goes above and one below the base.
+func TestGPOSMarkToBaseDifferentMarks(t *testing.T) {
+	f := loadTestFont(t)
+
+	// Shape "A + grave" and "A + cedilla" separately.
+	var cfg ShapeConfig
+	cfg.Font = f
+
+	graveRuns := cfg.ShapeSimple(nil, "A\u0300", DirectionLTR)
+	cedillaRuns := cfg.ShapeSimple(nil, "A\u0327", DirectionLTR)
+
+	if len(graveRuns) == 0 || len(graveRuns[0].Glyphs) < 2 {
+		t.Fatal("expected 2 glyphs for A+grave")
+	}
+	if len(cedillaRuns) == 0 || len(cedillaRuns[0].Glyphs) < 2 {
+		t.Fatal("expected 2 glyphs for A+cedilla")
+	}
+
+	var graveOff, cedillaOff int32
+	for _, g := range graveRuns[0].Glyphs {
+		if g.Codepoint == 0x0300 {
+			graveOff = g.OffsetY
+		}
+	}
+	for _, g := range cedillaRuns[0].Glyphs {
+		if g.Codepoint == 0x0327 {
+			cedillaOff = g.OffsetY
+		}
+	}
+
+	// Both marks should have positioning applied (non-zero offsets from type 4).
+	if graveOff == 0 && cedillaOff == 0 {
+		t.Error("both marks have zero OffsetY; GPOS mark-to-base not applied")
+		return
+	}
+
+	// They should differ: grave goes above (positive Y in font coords), cedilla below.
+	if graveOff == cedillaOff {
+		t.Errorf("grave and cedilla have same OffsetY=%d; expected different positions", graveOff)
+	}
+}
+
+// TestGPOSMarkToMark tests that GPOS type 6 (mark-to-mark) positions a second
+// combining mark relative to a first mark, not relative to the base.
+// Example: "a" + combining macron (U+0304) + combining acute (U+0301)
+// should place the acute above the macron, not at the same Y offset.
+func TestGPOSMarkToMark(t *testing.T) {
+	f := loadTestFont(t)
+
+	// Shape "a + macron + acute": two stacked diacritics.
+	text := "a\u0304\u0301"
+	var cfg ShapeConfig
+	cfg.Font = f
+	runs := cfg.ShapeSimple(nil, text, DirectionLTR)
+	if len(runs) == 0 || len(runs[0].Glyphs) < 3 {
+		t.Fatal("expected at least 3 glyphs")
+	}
+
+	var macronOff, acuteOff int32
+	var macronFound, acuteFound bool
+	for _, g := range runs[0].Glyphs {
+		if g.Codepoint == 0x0304 {
+			macronOff = g.OffsetY
+			macronFound = true
+		}
+		if g.Codepoint == 0x0301 {
+			acuteOff = g.OffsetY
+			acuteFound = true
+		}
+	}
+	if !macronFound || !acuteFound {
+		t.Fatal("missing macron or acute glyph in output")
+	}
+
+	// Without mark-to-mark (type 6), both marks get positioned relative to the base
+	// and may overlap. With type 6, the acute should be placed higher than the macron.
+	if macronOff == 0 && acuteOff == 0 {
+		t.Error("both marks have zero OffsetY; mark positioning not applied")
+		return
+	}
+
+	// The acute (stacked on top of macron) should have a different Y offset.
+	if acuteOff == macronOff {
+		t.Errorf("acute and macron have same OffsetY=%d; mark-to-mark should stack them", acuteOff)
+	}
+}
+
+// TestGPOSMarkDoesNotAffectAdvance verifies that mark positioning only changes
+// offsets, never advances. This is a key property of GPOS types 4 and 6.
+func TestGPOSMarkDoesNotAffectAdvance(t *testing.T) {
+	f := loadTestFont(t)
+
+	// Shape "A" alone and "A + combining acute" — base advance should be identical.
+	var cfg ShapeConfig
+	cfg.Font = f
+
+	plainRuns := cfg.ShapeSimple(nil, "A", DirectionLTR)
+	markRuns := cfg.ShapeSimple(nil, "A\u0301", DirectionLTR)
+
+	if len(plainRuns) == 0 || len(plainRuns[0].Glyphs) == 0 {
+		t.Fatal("no glyphs for plain A")
+	}
+	if len(markRuns) == 0 || len(markRuns[0].Glyphs) < 2 {
+		t.Fatal("expected 2 glyphs for A+acute")
+	}
+
+	plainAdv := plainRuns[0].Glyphs[0].AdvanceX
+	var markBaseAdv int32
+	for _, g := range markRuns[0].Glyphs {
+		if g.Codepoint == 'A' {
+			markBaseAdv = g.AdvanceX
+		}
+	}
+
+	if plainAdv != markBaseAdv {
+		t.Errorf("base 'A' advance changed with mark: plain=%d, withMark=%d", plainAdv, markBaseAdv)
+	}
+}
+
+// TestGPOSMarkFeatureLookups verifies that the test font actually contains
+// mark and mkmk features pointing to type 4 and type 6 lookups respectively.
+// This is a structural test that validates our test preconditions.
+func TestGPOSMarkFeatureLookups(t *testing.T) {
+	f := loadTestFont(t)
+	te := f.tables[tableGpos]
+	if te.length == 0 {
+		t.Skip("no GPOS table")
+	}
+	base := int(te.offset)
+	lookupListOff := base + int(readU16BE(f.data, base+8))
+
+	var idxBuf [4]int
+	// Check 'mark' feature exists and points to type 4 lookups.
+	markIndices := f.findGPOSFeatureIndices(idxBuf[:0], FeatureTagMark)
+	if len(markIndices) == 0 {
+		t.Fatal("font has no 'mark' GPOS feature")
+	}
+	hasType4 := false
+	for _, fi := range markIndices {
+		for _, li := range f.gposFeatureLookups(fi) {
+			lookupOff := lookupListOff + int(readU16BE(f.data, lookupListOff+2+int(li)*2))
+			lt := readU16BE(f.data, lookupOff)
+			if lt == 4 {
+				hasType4 = true
+			}
+		}
+	}
+	if !hasType4 {
+		t.Error("'mark' feature has no type 4 (mark-to-base) lookups")
+	}
+
+	// Check 'mkmk' feature exists and points to type 6 lookups.
+	mkmkIndices := f.findGPOSFeatureIndices(idxBuf[:0], FeatureTagMkmk)
+	if len(mkmkIndices) == 0 {
+		t.Fatal("font has no 'mkmk' GPOS feature")
+	}
+	hasType6 := false
+	for _, fi := range mkmkIndices {
+		for _, li := range f.gposFeatureLookups(fi) {
+			lookupOff := lookupListOff + int(readU16BE(f.data, lookupListOff+2+int(li)*2))
+			lt := readU16BE(f.data, lookupOff)
+			if lt == 6 {
+				hasType6 = true
+			}
+		}
+	}
+	if !hasType6 {
+		t.Error("'mkmk' feature has no type 6 (mark-to-mark) lookups")
+	}
+}

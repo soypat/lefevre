@@ -11,7 +11,7 @@ This is a Go rewrite of [kb_text_shape.h](https://github.com/JimmyLefevre/kb) (v
 Below is the result of running
 
 ```
-echo "مرحبا hello, office" | go run ./examples/visual/ testdata/DejaVuSans.ttf > lefevre.svg
+echo "مرحبا hello, office résumé?" | go run ./examples/visual/ testdata/DejaVuSans.ttf > lefevre.svg
 ```
 
 ![Visualization example.](./lefevre.svg)

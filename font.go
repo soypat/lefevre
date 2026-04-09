@@ -1853,12 +1853,17 @@ func (f *Font) gposFeatureLookups(featureIndex int) []uint16 {
 	return lookups
 }
 
-// applyGPOSKerning applies GPOS kerning (kern feature, lookup type 2) to glyphs.
+// defaultGPOSFeatures is the standard set of GPOS features applied in order.
+// mark/mkmk must come after kern so that mark positioning accounts for kerning adjustments.
+var defaultGPOSFeatures = [...]FeatureTag{
+	FeatureTagKern, // Kerning (pair adjustment)
+	FeatureTagMark, // Mark-to-base attachment
+	FeatureTagMkmk, // Mark-to-mark attachment
+}
+
+// applyGPOSFeatures applies GPOS positioning features to glyphs.
 // Modifies glyphs in place.
-func (f *Font) applyGPOSKerning(glyphs []Glyph, disabledFeatures map[FeatureTag]bool) {
-	if disabledFeatures != nil && disabledFeatures[FeatureTagKern] {
-		return
-	}
+func (f *Font) applyGPOSFeatures(glyphs []Glyph, disabledFeatures map[FeatureTag]bool) {
 	te := f.tables[tableGpos]
 	if te.length == 0 {
 		return
@@ -1874,21 +1879,28 @@ func (f *Font) applyGPOSKerning(glyphs []Glyph, disabledFeatures map[FeatureTag]
 	lookupCount := int(readU16BE(f.data, lookupListOff))
 
 	var idxBuf [4]int
-	featureIndices := f.findGPOSFeatureIndices(idxBuf[:0], FeatureTagKern)
-	if len(featureIndices) == 0 {
-		return
-	}
-
-	for _, fi := range featureIndices {
-		lookupIndices := f.gposFeatureLookups(fi)
-		for _, li := range lookupIndices {
-			if int(li) >= lookupCount {
-				continue
+	for _, tag := range defaultGPOSFeatures {
+		if disabledFeatures != nil && disabledFeatures[tag] {
+			continue
+		}
+		featureIndices := f.findGPOSFeatureIndices(idxBuf[:0], tag)
+		for _, fi := range featureIndices {
+			lookupIndices := f.gposFeatureLookups(fi)
+			for _, li := range lookupIndices {
+				if int(li) >= lookupCount {
+					continue
+				}
+				lookupOff := lookupListOff + int(readU16BE(f.data, lookupListOff+2+int(li)*2))
+				f.applyGPOSLookup(glyphs, lookupOff)
 			}
-			lookupOff := lookupListOff + int(readU16BE(f.data, lookupListOff+2+int(li)*2))
-			f.applyGPOSLookup(glyphs, lookupOff)
 		}
 	}
+}
+
+// applyGPOSKerning applies GPOS kerning (kern feature, lookup type 2) to glyphs.
+// Deprecated: Use applyGPOSFeatures instead. Kept for backward compatibility.
+func (f *Font) applyGPOSKerning(glyphs []Glyph, disabledFeatures map[FeatureTag]bool) {
+	f.applyGPOSFeatures(glyphs, disabledFeatures)
 }
 
 // applyGPOSLookup applies a single GPOS lookup to glyphs.
@@ -1909,6 +1921,10 @@ func (f *Font) applyGPOSLookup(glyphs []Glyph, lookupOff int) {
 			f.applyGPOSSingleAdjust(glyphs, subtableOff)
 		case 2:
 			f.applyGPOSPairAdjust(glyphs, subtableOff)
+		case 4:
+			f.applyGPOSMarkToBase(glyphs, subtableOff)
+		case 6:
+			f.applyGPOSMarkToMark(glyphs, subtableOff)
 		case 9:
 			f.applyGPOSExtension(glyphs, subtableOff)
 		}
@@ -1933,7 +1949,171 @@ func (f *Font) applyGPOSExtension(glyphs []Glyph, subtableOff int) {
 		f.applyGPOSSingleAdjust(glyphs, realOff)
 	case 2:
 		f.applyGPOSPairAdjust(glyphs, realOff)
+	case 4:
+		f.applyGPOSMarkToBase(glyphs, realOff)
+	case 6:
+		f.applyGPOSMarkToMark(glyphs, realOff)
 	}
+}
+
+// readAnchor reads an anchor table at the given absolute offset, returning X and Y.
+func readAnchor(data []byte, off int) (x, y int16) {
+	if off+6 > len(data) {
+		return 0, 0
+	}
+	// Format 1, 2, and 3 all have X at offset 2, Y at offset 4.
+	return readS16BE(data, off+2), readS16BE(data, off+4)
+}
+
+// applyGPOSMarkToBase applies GPOS type 4 (mark-to-base attachment).
+// For each mark glyph covered by MarkCoverage, finds the preceding base glyph
+// covered by BaseCoverage and positions the mark relative to the base using anchor points.
+func (f *Font) applyGPOSMarkToBase(glyphs []Glyph, subtableOff int) {
+	// MarkToBase subtable (format 1 only):
+	//   u16 format (must be 1)
+	//   u16 markCoverageOffset
+	//   u16 baseCoverageOffset
+	//   u16 markClassCount
+	//   u16 markArrayOffset
+	//   u16 baseArrayOffset
+	if subtableOff+12 > len(f.data) {
+		return
+	}
+	format := readU16BE(f.data, subtableOff)
+	if format != 1 {
+		return
+	}
+	markCovOff := subtableOff + int(readU16BE(f.data, subtableOff+2))
+	baseCovOff := subtableOff + int(readU16BE(f.data, subtableOff+4))
+	markClassCount := int(readU16BE(f.data, subtableOff+6))
+	markArrayOff := subtableOff + int(readU16BE(f.data, subtableOff+8))
+	baseArrayOff := subtableOff + int(readU16BE(f.data, subtableOff+10))
+
+	for i := range glyphs {
+		markCovIdx := f.coverageIndex(markCovOff, glyphs[i].ID)
+		if markCovIdx < 0 {
+			continue
+		}
+
+		// Find preceding base glyph (skip marks).
+		baseIdx := -1
+		var advSinceBaseX, advSinceBaseY int32
+		for j := i - 1; j >= 0; j-- {
+			cls := f.glyphClassDef(glyphs[j].ID)
+			if cls != glyphClassMark {
+				advSinceBaseX += glyphs[j].AdvanceX
+				advSinceBaseY += glyphs[j].AdvanceY
+			}
+			if cls == glyphClassBase || cls == glyphClassLigature || cls == glyphClassZero {
+				baseCovIdx := f.coverageIndex(baseCovOff, glyphs[j].ID)
+				if baseCovIdx >= 0 {
+					baseIdx = j
+					f.attachMark(glyphs, i, baseIdx, markArrayOff, markCovIdx, baseArrayOff, baseCovIdx, markClassCount, advSinceBaseX, advSinceBaseY)
+				}
+				break
+			}
+		}
+		_ = baseIdx
+	}
+}
+
+// applyGPOSMarkToMark applies GPOS type 6 (mark-to-mark attachment).
+// Positions a combining mark relative to a preceding mark glyph.
+func (f *Font) applyGPOSMarkToMark(glyphs []Glyph, subtableOff int) {
+	// Same structure as MarkToBase but with mark1 (base mark) and mark2 (attaching mark).
+	if subtableOff+12 > len(f.data) {
+		return
+	}
+	format := readU16BE(f.data, subtableOff)
+	if format != 1 {
+		return
+	}
+	mark2CovOff := subtableOff + int(readU16BE(f.data, subtableOff+2))
+	mark1CovOff := subtableOff + int(readU16BE(f.data, subtableOff+4))
+	markClassCount := int(readU16BE(f.data, subtableOff+6))
+	mark2ArrayOff := subtableOff + int(readU16BE(f.data, subtableOff+8))
+	mark1ArrayOff := subtableOff + int(readU16BE(f.data, subtableOff+10))
+
+	for i := range glyphs {
+		mark2CovIdx := f.coverageIndex(mark2CovOff, glyphs[i].ID)
+		if mark2CovIdx < 0 {
+			continue
+		}
+
+		// Find preceding mark glyph (the base mark).
+		var advSinceBaseX, advSinceBaseY int32
+		for j := i - 1; j >= 0; j-- {
+			cls := f.glyphClassDef(glyphs[j].ID)
+			advSinceBaseX += glyphs[j].AdvanceX
+			advSinceBaseY += glyphs[j].AdvanceY
+			if cls == glyphClassMark {
+				mark1CovIdx := f.coverageIndex(mark1CovOff, glyphs[j].ID)
+				if mark1CovIdx >= 0 {
+					f.attachMark(glyphs, i, j, mark2ArrayOff, mark2CovIdx, mark1ArrayOff, mark1CovIdx, markClassCount, advSinceBaseX, advSinceBaseY)
+				}
+				break
+			}
+			// Non-mark encountered before finding a base mark: stop.
+			break
+		}
+	}
+}
+
+// attachMark positions a mark glyph relative to a base glyph using anchor tables.
+// markArrayOff/markCovIdx identify the mark's anchor; baseArrayOff/baseCovIdx/markClassCount
+// identify the base's anchor for the mark's class. advSince is the total advance between them.
+func (f *Font) attachMark(glyphs []Glyph, markIdx, baseIdx int, markArrayOff, markCovIdx int, baseArrayOff, baseCovIdx, markClassCount int, advSinceX, advSinceY int32) {
+	// MarkArray:
+	//   u16 markCount
+	//   MarkRecord[markCount]:
+	//     u16 markClass
+	//     u16 markAnchorOffset (from start of MarkArray)
+	if markArrayOff+2 > len(f.data) {
+		return
+	}
+	markCount := int(readU16BE(f.data, markArrayOff))
+	if markCovIdx >= markCount {
+		return
+	}
+	markRecOff := markArrayOff + 2 + markCovIdx*4
+	if markRecOff+4 > len(f.data) {
+		return
+	}
+	markClass := int(readU16BE(f.data, markRecOff))
+	markAnchorOff := markArrayOff + int(readU16BE(f.data, markRecOff+2))
+
+	if markClass >= markClassCount {
+		return
+	}
+
+	// BaseArray:
+	//   u16 baseCount
+	//   BaseRecord[baseCount]:
+	//     u16 anchorOffset[markClassCount] (from start of BaseArray)
+	if baseArrayOff+2 > len(f.data) {
+		return
+	}
+	baseCount := int(readU16BE(f.data, baseArrayOff))
+	if baseCovIdx >= baseCount {
+		return
+	}
+	baseRecOff := baseArrayOff + 2 + baseCovIdx*markClassCount*2 + markClass*2
+	if baseRecOff+2 > len(f.data) {
+		return
+	}
+	baseAnchorRelOff := int(readU16BE(f.data, baseRecOff))
+	if baseAnchorRelOff == 0 {
+		return // NULL anchor
+	}
+	baseAnchorOff := baseArrayOff + baseAnchorRelOff
+
+	markAnchorX, markAnchorY := readAnchor(f.data, markAnchorOff)
+	baseAnchorX, baseAnchorY := readAnchor(f.data, baseAnchorOff)
+
+	glyphs[markIdx].OffsetX = glyphs[baseIdx].OffsetX - advSinceX + int32(baseAnchorX) - int32(markAnchorX)
+	glyphs[markIdx].OffsetY = glyphs[baseIdx].OffsetY - advSinceY + int32(baseAnchorY) - int32(markAnchorY)
+	glyphs[markIdx].Flags |= GlyphFlagUsedInGPOS
+	glyphs[baseIdx].Flags |= GlyphFlagUsedInGPOS
 }
 
 // applyGPOSSingleAdjust applies GPOS type 1 (single adjustment).
