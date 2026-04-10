@@ -1,0 +1,7 @@
+- Always implement tests for the functionality you are adding first.
+- Write behavioural tests. Do not test internal, unexported data. Test actual exposed functionality. Do not add extraneous functionality just to test. Respect clear, concise user facing APIs
+- Always use slice data structures over maps where possible.
+    - Use generic slices package for slice algorithms where it makes sense.
+    - Use internal/slices.go for building these memory reuse slice constructs like queues/stacks. See ../lneto/ipv4/icmpv4/client.go for example of how to use these correctly.
+- Prioritize correctness, readability and conciseness. Express ideas clearly and concisely in the code.
+- Keep in mind ./local folder has references for inspiration like original kb and text rendering raylib and stb references.

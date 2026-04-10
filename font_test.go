@@ -1715,3 +1715,161 @@ func TestGPOSMarkFeatureLookups(t *testing.T) {
 		t.Error("'mkmk' feature has no type 6 (mark-to-mark) lookups")
 	}
 }
+
+// GlyphAdvance (exported) tests
+
+func TestGlyphAdvance_LatinA(t *testing.T) {
+	f := loadTestFont(t)
+	gid := f.GlyphID('A')
+	adv := f.GlyphAdvance(gid)
+	if adv <= 0 {
+		t.Errorf("GlyphAdvance('A') = %d, want > 0", adv)
+	}
+}
+
+func TestGlyphAdvance_Space(t *testing.T) {
+	f := loadTestFont(t)
+	gid := f.GlyphID(' ')
+	adv := f.GlyphAdvance(gid)
+	if adv <= 0 {
+		t.Errorf("GlyphAdvance(' ') = %d, want > 0", adv)
+	}
+}
+
+func TestGlyphAdvance_MatchesInternal(t *testing.T) {
+	f := loadTestFont(t)
+	gid := f.GlyphID('A')
+	if f.GlyphAdvance(gid) != f.glyphAdvance(gid) {
+		t.Error("GlyphAdvance and glyphAdvance disagree")
+	}
+}
+
+// GlyphBounds tests
+
+func TestGlyphBounds_LatinA(t *testing.T) {
+	f := loadTestFont(t)
+	gid := f.GlyphID('A')
+	xMin, yMin, xMax, yMax := f.GlyphBounds(gid)
+	if xMax <= xMin {
+		t.Errorf("GlyphBounds('A') xMax=%d <= xMin=%d", xMax, xMin)
+	}
+	if yMax <= yMin {
+		t.Errorf("GlyphBounds('A') yMax=%d <= yMin=%d", yMax, yMin)
+	}
+}
+
+func TestGlyphBounds_Space(t *testing.T) {
+	f := loadTestFont(t)
+	gid := f.GlyphID(' ')
+	xMin, yMin, xMax, yMax := f.GlyphBounds(gid)
+	// Space has no outline, so bounds should be zero.
+	if xMin != 0 || yMin != 0 || xMax != 0 || yMax != 0 {
+		t.Errorf("GlyphBounds(' ') = (%d,%d,%d,%d), want all zero", xMin, yMin, xMax, yMax)
+	}
+}
+
+func TestGlyphBounds_InvalidGlyph(t *testing.T) {
+	f := loadTestFont(t)
+	xMin, yMin, xMax, yMax := f.GlyphBounds(0xFFFF)
+	if xMin != 0 || yMin != 0 || xMax != 0 || yMax != 0 {
+		t.Errorf("GlyphBounds(0xFFFF) = (%d,%d,%d,%d), want all zero", xMin, yMin, xMax, yMax)
+	}
+}
+
+// GlyphOutline tests
+
+func TestGlyphOutline_LatinA(t *testing.T) {
+	f := loadTestFont(t)
+	gid := f.GlyphID('A')
+	segs := f.GlyphOutline(nil, gid)
+	if len(segs) == 0 {
+		t.Fatal("GlyphOutline('A') returned no segments")
+	}
+	// Must start with MoveTo.
+	if segs[0].Op != SegmentMoveTo {
+		t.Errorf("first segment op = %d, want SegmentMoveTo(%d)", segs[0].Op, SegmentMoveTo)
+	}
+	// Must contain at least one Close.
+	hasClose := false
+	for _, s := range segs {
+		if s.Op == SegmentClose {
+			hasClose = true
+			break
+		}
+	}
+	if !hasClose {
+		t.Error("GlyphOutline('A') has no SegmentClose")
+	}
+}
+
+func TestGlyphOutline_LatinA_ContourCount(t *testing.T) {
+	f := loadTestFont(t)
+	gid := f.GlyphID('A')
+	segs := f.GlyphOutline(nil, gid)
+	// 'A' has 2 contours (outer shape + inner triangle hole).
+	contours := 0
+	for _, s := range segs {
+		if s.Op == SegmentMoveTo {
+			contours++
+		}
+	}
+	if contours != 2 {
+		t.Errorf("GlyphOutline('A') has %d contours, want 2", contours)
+	}
+}
+
+func TestGlyphOutline_Space(t *testing.T) {
+	f := loadTestFont(t)
+	gid := f.GlyphID(' ')
+	segs := f.GlyphOutline(nil, gid)
+	if len(segs) != 0 {
+		t.Errorf("GlyphOutline(' ') returned %d segments, want 0", len(segs))
+	}
+}
+
+func TestGlyphOutline_InvalidGlyph(t *testing.T) {
+	f := loadTestFont(t)
+	segs := f.GlyphOutline(nil, 0xFFFF)
+	if len(segs) != 0 {
+		t.Errorf("GlyphOutline(0xFFFF) returned %d segments, want 0", len(segs))
+	}
+}
+
+func TestGlyphOutline_AppendsToExisting(t *testing.T) {
+	f := loadTestFont(t)
+	gid := f.GlyphID('A')
+	sentinel := Segment{Op: SegmentLineTo, X: 9999, Y: 9999}
+	dst := []Segment{sentinel}
+	result := f.GlyphOutline(dst, gid)
+	if len(result) <= 1 {
+		t.Fatal("GlyphOutline did not append segments")
+	}
+	if result[0] != sentinel {
+		t.Error("GlyphOutline overwrote existing segment instead of appending")
+	}
+}
+
+func TestGlyphOutline_EveryContourClosed(t *testing.T) {
+	f := loadTestFont(t)
+	// Check several glyphs that have outlines.
+	for _, r := range "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789" {
+		gid := f.GlyphID(r)
+		segs := f.GlyphOutline(nil, gid)
+		if len(segs) == 0 {
+			continue
+		}
+		// Every MoveTo must be balanced by a Close.
+		moves, closes := 0, 0
+		for _, s := range segs {
+			switch s.Op {
+			case SegmentMoveTo:
+				moves++
+			case SegmentClose:
+				closes++
+			}
+		}
+		if moves != closes {
+			t.Errorf("glyph %q: %d MoveTo vs %d Close", r, moves, closes)
+		}
+	}
+}

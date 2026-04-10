@@ -247,6 +247,24 @@ const (
 	FontWidthUltraExpanded
 )
 
+// SegmentOp identifies a glyph outline path operation.
+type SegmentOp uint8
+
+const (
+	SegmentMoveTo SegmentOp = iota // Start new contour at (X, Y)
+	SegmentLineTo                  // Line to (X, Y)
+	SegmentQuadTo                  // Quadratic bezier: control (Cx, Cy), endpoint (X, Y)
+	SegmentClose                   // Close contour
+)
+
+// Segment is one element of a glyph outline path.
+// Coordinates are in font units with Y-up convention.
+type Segment struct {
+	Op     SegmentOp
+	X, Y   int16 // Endpoint (font units)
+	Cx, Cy int16 // Control point for QuadTo (unused for other ops)
+}
+
 // Glyph is the output of text shaping: a positioned glyph ready for rasterization.
 type Glyph struct {
 	Codepoint rune
@@ -342,6 +360,26 @@ func (f *Font) Info() FontInfo {
 // Returns 0 (.notdef) if the codepoint is not mapped or the font is invalid.
 func (f *Font) GlyphID(codepoint rune) uint16 {
 	return f.glyphID(codepoint)
+}
+
+// GlyphAdvance returns the horizontal advance width for a glyph ID in font units.
+// Returns 0 if the glyph ID is invalid or the font lacks horizontal metrics.
+func (f *Font) GlyphAdvance(glyphID uint16) int32 {
+	return f.glyphAdvance(glyphID)
+}
+
+// GlyphBounds returns the bounding box of a glyph in font units.
+// Returns zeros if the glyph has no outline (e.g., space) or the glyph ID is invalid.
+func (f *Font) GlyphBounds(glyphID uint16) (xMin, yMin, xMax, yMax int16) {
+	return f.glyphBounds(glyphID)
+}
+
+// GlyphOutline appends the outline path segments for glyphID to dst.
+// Coordinates are in font units with Y-up convention.
+// For composite glyphs, components are recursively flattened.
+// Returns dst unchanged if the glyph has no outline (e.g., space).
+func (f *Font) GlyphOutline(dst []Segment, glyphID uint16) []Segment {
+	return f.glyphOutline(dst, glyphID)
 }
 
 // BreakConfigFlags controls break generation behavior.

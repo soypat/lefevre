@@ -19,6 +19,8 @@ const (
 	tableMaxp
 	tableOS2
 	tableName
+	tableLoca
+	tableGlyf
 	tableCount
 )
 
@@ -82,6 +84,8 @@ var tableTagMap = map[uint32]int{
 	0x6D617870: tableMaxp, // 'maxp'
 	0x4F532F32: tableOS2,  // 'OS/2'
 	0x6E616D65: tableName, // 'name'
+	0x6C6F6361: tableLoca, // 'loca'
+	0x676C7966: tableGlyf, // 'glyf'
 }
 
 // fontFromMemory parses a font from raw bytes.
@@ -2260,4 +2264,318 @@ func (f *Font) applyPairAdjustFormat2(glyphs []Glyph, subtableOff int, coverageO
 			glyphs[i+1].Flags |= GlyphFlagUsedInGPOS
 		}
 	}
+}
+
+// glyphDataRange returns the byte offset and length within the glyf table for a glyph.
+// Returns (0, 0) for empty glyphs (e.g., space) or invalid glyph IDs.
+func (f *Font) glyphDataRange(glyphID uint16) (off, length uint32) {
+	loca := f.tables[tableLoca]
+	glyf := f.tables[tableGlyf]
+	maxp := f.tables[tableMaxp]
+	if loca.length == 0 || glyf.length == 0 || maxp.length < 6 {
+		return 0, 0
+	}
+	numGlyphs := int(readU16BE(f.data, int(maxp.offset)+4))
+	if int(glyphID) >= numGlyphs {
+		return 0, 0
+	}
+
+	// Determine loca format from head table indexToLocFormat field.
+	head := f.tables[tableHead]
+	if head.length < 52 {
+		return 0, 0
+	}
+	longLoca := readS16BE(f.data, int(head.offset)+50) == 1
+
+	var start, end uint32
+	if longLoca {
+		idx := int(loca.offset) + int(glyphID)*4
+		if idx+8 > len(f.data) {
+			return 0, 0
+		}
+		start = readU32BE(f.data, idx)
+		end = readU32BE(f.data, idx+4)
+	} else {
+		idx := int(loca.offset) + int(glyphID)*2
+		if idx+4 > len(f.data) {
+			return 0, 0
+		}
+		start = uint32(readU16BE(f.data, idx)) * 2
+		end = uint32(readU16BE(f.data, idx+2)) * 2
+	}
+	if end <= start {
+		return 0, 0
+	}
+	return glyf.offset + start, end - start
+}
+
+// glyphBounds returns the bounding box of a glyph in font units.
+func (f *Font) glyphBounds(glyphID uint16) (xMin, yMin, xMax, yMax int16) {
+	off, length := f.glyphDataRange(glyphID)
+	if length == 0 || int(off)+10 > len(f.data) {
+		return 0, 0, 0, 0
+	}
+	p := int(off)
+	return readS16BE(f.data, p+2), readS16BE(f.data, p+4), readS16BE(f.data, p+6), readS16BE(f.data, p+8)
+}
+
+const maxCompositeDepth = 8
+
+// glyphOutline appends outline segments for a glyph to dst.
+func (f *Font) glyphOutline(dst []Segment, glyphID uint16) []Segment {
+	return f.glyphOutlineDepth(dst, glyphID, 0, 0, 0)
+}
+
+func (f *Font) glyphOutlineDepth(dst []Segment, glyphID uint16, depth int, dx, dy int16) []Segment {
+	off, length := f.glyphDataRange(glyphID)
+	if length == 0 || int(off)+int(length) > len(f.data) {
+		return dst
+	}
+	p := int(off)
+	nContours := readS16BE(f.data, p)
+	p += 10 // skip nContours + xMin/yMin/xMax/yMax
+
+	if nContours >= 0 {
+		return f.parseSimpleGlyphOutline(dst, p, int(nContours), dx, dy)
+	}
+	if depth >= maxCompositeDepth {
+		return dst
+	}
+	return f.parseCompositeGlyphOutline(dst, p, depth, dx, dy)
+}
+
+func (f *Font) parseSimpleGlyphOutline(dst []Segment, p int, nContours int, dx, dy int16) []Segment {
+	if nContours == 0 {
+		return dst
+	}
+	data := f.data
+	if p+nContours*2 > len(data) {
+		return dst
+	}
+
+	// Read endPtsOfContours.
+	endPts := make([]int, nContours)
+	for i := range nContours {
+		endPts[i] = int(readU16BE(data, p+i*2))
+	}
+	p += nContours * 2
+	totalPoints := endPts[nContours-1] + 1
+
+	// Skip instructions.
+	if p+2 > len(data) {
+		return dst
+	}
+	instrLen := int(readU16BE(data, p))
+	p += 2 + instrLen
+	if p > len(data) {
+		return dst
+	}
+
+	// Parse flags.
+	flags := make([]byte, totalPoints)
+	for i := 0; i < totalPoints; {
+		if p >= len(data) {
+			return dst
+		}
+		fl := data[p]
+		p++
+		flags[i] = fl
+		i++
+		if fl&0x08 != 0 { // repeat
+			if p >= len(data) {
+				return dst
+			}
+			repeat := int(data[p])
+			p++
+			for r := 0; r < repeat && i < totalPoints; r++ {
+				flags[i] = fl
+				i++
+			}
+		}
+	}
+
+	// Parse X coordinates.
+	xs := make([]int16, totalPoints)
+	var xAccum int16
+	for i := range totalPoints {
+		fl := flags[i]
+		if fl&0x02 != 0 { // short
+			if p >= len(data) {
+				return dst
+			}
+			d := int16(data[p])
+			p++
+			if fl&0x10 == 0 {
+				d = -d
+			}
+			xAccum += d
+		} else if fl&0x10 == 0 { // long delta
+			if p+2 > len(data) {
+				return dst
+			}
+			xAccum += readS16BE(data, p)
+			p += 2
+		}
+		xs[i] = xAccum
+	}
+
+	// Parse Y coordinates.
+	ys := make([]int16, totalPoints)
+	var yAccum int16
+	for i := range totalPoints {
+		fl := flags[i]
+		if fl&0x04 != 0 { // short
+			if p >= len(data) {
+				return dst
+			}
+			d := int16(data[p])
+			p++
+			if fl&0x20 == 0 {
+				d = -d
+			}
+			yAccum += d
+		} else if fl&0x20 == 0 { // long delta
+			if p+2 > len(data) {
+				return dst
+			}
+			yAccum += readS16BE(data, p)
+			p += 2
+		}
+		ys[i] = yAccum
+	}
+
+	// Convert contours to Segment path ops.
+	start := 0
+	for c := range nContours {
+		end := endPts[c]
+		n := end - start + 1
+		if n < 2 {
+			start = end + 1
+			continue
+		}
+		dst = contourToSegments(dst, xs[start:start+n], ys[start:start+n], flags[start:start+n], dx, dy)
+		start = end + 1
+	}
+	return dst
+}
+
+// contourToSegments converts a TrueType contour (points with on/off curve flags)
+// into MoveTo/LineTo/QuadTo/Close segments, appending to dst.
+func contourToSegments(dst []Segment, xs, ys []int16, flags []byte, dx, dy int16) []Segment {
+	n := len(xs)
+	// Find first on-curve point.
+	startIdx := -1
+	for i := range n {
+		if flags[i]&0x01 != 0 {
+			startIdx = i
+			break
+		}
+	}
+
+	var startX, startY int16
+	var walkStart int
+	if startIdx >= 0 {
+		startX = xs[startIdx] + dx
+		startY = ys[startIdx] + dy
+		walkStart = startIdx + 1
+	} else {
+		// All off-curve: implied on-curve midpoint of first two.
+		startX = (xs[0]+xs[1])/2 + dx
+		startY = (ys[0]+ys[1])/2 + dy
+		walkStart = 1
+	}
+	dst = append(dst, Segment{Op: SegmentMoveTo, X: startX, Y: startY})
+
+	prevOnCurve := true
+	var prevX, prevY int16
+	for step := range n {
+		idx := (walkStart + step) % n
+		px := xs[idx] + dx
+		py := ys[idx] + dy
+		onCurve := flags[idx]&0x01 != 0
+
+		if onCurve {
+			if prevOnCurve {
+				dst = append(dst, Segment{Op: SegmentLineTo, X: px, Y: py})
+			} else {
+				dst = append(dst, Segment{Op: SegmentQuadTo, X: px, Y: py, Cx: prevX, Cy: prevY})
+			}
+			prevOnCurve = true
+		} else {
+			if !prevOnCurve {
+				// Implied on-curve midpoint.
+				mx := (prevX + px) / 2
+				my := (prevY + py) / 2
+				dst = append(dst, Segment{Op: SegmentQuadTo, X: mx, Y: my, Cx: prevX, Cy: prevY})
+			}
+			prevX, prevY = px, py
+			prevOnCurve = false
+		}
+	}
+
+	// Close: if last was off-curve, curve back to start.
+	if !prevOnCurve {
+		dst = append(dst, Segment{Op: SegmentQuadTo, X: startX, Y: startY, Cx: prevX, Cy: prevY})
+	}
+	dst = append(dst, Segment{Op: SegmentClose})
+	return dst
+}
+
+// Composite glyph flags.
+const (
+	compArg1And2AreWords = 1 << 0
+	compArgsAreXYValues  = 1 << 1
+	compWeHaveAScale     = 1 << 3
+	compMoreComponents   = 1 << 5
+	compWeHaveAnXYScale  = 1 << 6
+	compWeHaveATwoByTwo  = 1 << 7
+)
+
+func (f *Font) parseCompositeGlyphOutline(dst []Segment, p int, depth int, dx, dy int16) []Segment {
+	data := f.data
+	for {
+		if p+4 > len(data) {
+			break
+		}
+		cflags := readU16BE(data, p)
+		glyphIdx := readU16BE(data, p+2)
+		p += 4
+
+		var cdx, cdy int16
+		if cflags&compArg1And2AreWords != 0 {
+			if p+4 > len(data) {
+				break
+			}
+			if cflags&compArgsAreXYValues != 0 {
+				cdx = readS16BE(data, p)
+				cdy = readS16BE(data, p+2)
+			}
+			p += 4
+		} else {
+			if p+2 > len(data) {
+				break
+			}
+			if cflags&compArgsAreXYValues != 0 {
+				cdx = int16(int8(data[p]))
+				cdy = int16(int8(data[p+1]))
+			}
+			p += 2
+		}
+
+		// Skip scale/matrix data.
+		if cflags&compWeHaveAScale != 0 {
+			p += 2
+		} else if cflags&compWeHaveAnXYScale != 0 {
+			p += 4
+		} else if cflags&compWeHaveATwoByTwo != 0 {
+			p += 8
+		}
+
+		dst = f.glyphOutlineDepth(dst, glyphIdx, depth+1, dx+cdx, dy+cdy)
+
+		if cflags&compMoreComponents == 0 {
+			break
+		}
+	}
+	return dst
 }
