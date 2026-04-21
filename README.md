@@ -7,9 +7,15 @@
 
 This is a Go rewrite of [kb_text_shape.h](https://github.com/JimmyLefevre/kb) (v2.14, by Jimmy Lefevre), a 28K-line single-header C library for Unicode text segmentation and OpenType shaping.
 
-It also now includes text rasterizing.
+It also now includes text rasterizing in [raster](./raster/) package.
 
 
+## Scope/Roadmap
+The scope of this package is fulfilled. A pure go, no dependency package to do text shaping and rastering.
+
+What remains is reducing heap allocations and improving APIs to be more comfy and performant.
+
+## Examples
 Below is the result of running
 
 ```
