@@ -7,6 +7,8 @@
 
 This is a Go rewrite of [kb_text_shape.h](https://github.com/JimmyLefevre/kb) (v2.14, by Jimmy Lefevre), a 28K-line single-header C library for Unicode text segmentation and OpenType shaping.
 
+It also now includes text rasterizing.
+
 
 Below is the result of running
 
@@ -15,3 +17,10 @@ echo "مرحبا hello, office résumé?" | go run ./examples/visual/ testdata/D
 ```
 
 ![Visualization example.](./lefevre.svg)
+
+A CPU rasterization demo is also available:
+
+```
+go run ./examples/raster/ -font testdata/DejaVuSans.ttf 
+```
+![Rasterization example.](./raster.png)
