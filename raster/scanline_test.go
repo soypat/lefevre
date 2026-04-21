@@ -110,6 +110,78 @@ func TestScanlineRasterizer_ScratchReuse(t *testing.T) {
 	}
 }
 
+func TestScanlineRasterizer_ProducesPartialCoverage(t *testing.T) {
+	// Triangle with a diagonal edge — AA rasterizer must produce at least
+	// some pixels with 0 < v < 255 along the slope. Non-AA produces only 0/255.
+	segs := []lefevre.Segment{
+		{Op: lefevre.SegmentMoveTo, X: 2, Y: 2},
+		{Op: lefevre.SegmentLineTo, X: 14, Y: 2},
+		{Op: lefevre.SegmentLineTo, X: 2, Y: 14},
+		{Op: lefevre.SegmentClose},
+	}
+	const w, h = 16, 16
+	buf := make([]byte, w*h)
+	var r ScanlineRasterizer
+	r.Rasterize(buf, w, h, w, segs, 1, 0, 0)
+
+	partial := 0
+	for _, b := range buf {
+		if b > 0 && b < 255 {
+			partial++
+		}
+	}
+	if partial == 0 {
+		t.Error("no partial-coverage pixels — rasterizer is not antialiased")
+	}
+}
+
+func TestScanlineRasterizer_NonIntegerRectArea(t *testing.T) {
+	// Rectangle [4.5..11.5] x [4.5..11.5]. True area = 7*7 = 49.
+	// AA should place half-coverage at the fractional edges.
+	segs := []lefevre.Segment{
+		{Op: lefevre.SegmentMoveTo, X: 9, Y: 9},
+		{Op: lefevre.SegmentLineTo, X: 23, Y: 9},
+		{Op: lefevre.SegmentLineTo, X: 23, Y: 23},
+		{Op: lefevre.SegmentLineTo, X: 9, Y: 23},
+		{Op: lefevre.SegmentClose},
+	}
+	const w, h = 16, 16
+	buf := make([]byte, w*h)
+	var r ScanlineRasterizer
+	// scale=0.5 maps font (9..23) to pixel (4.5..11.5).
+	r.Rasterize(buf, w, h, w, segs, 0.5, 0, 0)
+
+	var sum float64
+	for _, b := range buf {
+		sum += float64(b) / 255
+	}
+	// Expect 49.0 ± tolerance (midpoint + 4x vertical supersample).
+	const want = 49.0
+	if sum < want-1.5 || sum > want+1.5 {
+		t.Errorf("area = %.2f, want %.2f ± 1.5", sum, want)
+	}
+}
+
+func TestScanlineRasterizer_InteriorSolid(t *testing.T) {
+	// Large integer-aligned rectangle. Interior must be solid 255.
+	segs := []lefevre.Segment{
+		{Op: lefevre.SegmentMoveTo, X: 2, Y: 2},
+		{Op: lefevre.SegmentLineTo, X: 14, Y: 2},
+		{Op: lefevre.SegmentLineTo, X: 14, Y: 14},
+		{Op: lefevre.SegmentLineTo, X: 2, Y: 14},
+		{Op: lefevre.SegmentClose},
+	}
+	const w, h = 16, 16
+	buf := make([]byte, w*h)
+	var r ScanlineRasterizer
+	r.Rasterize(buf, w, h, w, segs, 1, 0, 0)
+
+	// Pixel (8,8) is deep inside — must be fully covered.
+	if v := buf[8*w+8]; v != 255 {
+		t.Errorf("interior pixel = %d, want 255", v)
+	}
+}
+
 func TestScanlineRasterizer_QuadBezier(t *testing.T) {
 	// A simple curved shape using QuadTo.
 	segs := []lefevre.Segment{

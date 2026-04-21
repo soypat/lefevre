@@ -106,6 +106,63 @@ func TestBakeAtlas_NonZeroCoverage(t *testing.T) {
 	}
 }
 
+func TestPack_PopulatesGlyphMetrics(t *testing.T) {
+	f := loadTestFont(t)
+	info := f.Info()
+	scale := float32(32) / float32(info.UnitsPerEm)
+	cfg := PackConfig{Font: f, Scale: scale, Padding: 1}
+
+	glyphs := []uint16{f.GlyphID('A')}
+	placements, err := cfg.Pack(nil, glyphs, 256, 256)
+	if err != nil {
+		t.Fatalf("Pack failed: %v", err)
+	}
+	p := placements[0]
+	if p.GlyphID != glyphs[0] {
+		t.Errorf("GlyphID = %d, want %d", p.GlyphID, glyphs[0])
+	}
+	if p.W <= 0 || p.H <= 0 {
+		t.Errorf("W/H = %dx%d, want positive for 'A'", p.W, p.H)
+	}
+	// 'A' sits above baseline, so Yoff must be negative (bitmap top above pen).
+	if p.Yoff >= 0 {
+		t.Errorf("Yoff = %d, want < 0 for 'A'", p.Yoff)
+	}
+}
+
+func TestBakeAtlas_CoverageStaysInsideRect(t *testing.T) {
+	f := loadTestFont(t)
+	info := f.Info()
+	scale := float32(24) / float32(info.UnitsPerEm)
+	cfg := PackConfig{Font: f, Scale: scale, Padding: 2}
+
+	glyphs := []uint16{f.GlyphID('A'), f.GlyphID('g'), f.GlyphID('M')}
+	const atlasW, atlasH = 128, 128
+	atlas := make([]byte, atlasW*atlasH)
+	placements := make([]PackedGlyph, len(glyphs))
+
+	var r ScanlineRasterizer
+	if err := cfg.BakeAtlas(&r, glyphs, atlas, atlasW, atlasH, placements); err != nil {
+		t.Fatalf("BakeAtlas: %v", err)
+	}
+
+	inside := func(x, y int) bool {
+		for _, p := range placements {
+			if x >= p.X && x < p.X+p.W && y >= p.Y && y < p.Y+p.H {
+				return true
+			}
+		}
+		return false
+	}
+	for y := 0; y < atlasH; y++ {
+		for x := 0; x < atlasW; x++ {
+			if atlas[y*atlasW+x] != 0 && !inside(x, y) {
+				t.Fatalf("coverage at (%d,%d) outside every placement rect", x, y)
+			}
+		}
+	}
+}
+
 func TestPack_AppendsToExisting(t *testing.T) {
 	f := loadTestFont(t)
 	info := f.Info()
