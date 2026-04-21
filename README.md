@@ -24,3 +24,6 @@ A CPU rasterization demo is also available:
 go run ./examples/raster/ -font testdata/DejaVuSans.ttf 
 ```
 ![Rasterization example.](./raster.png)
+
+## LLM policy
+This project is in great part assisted by LLMs.
