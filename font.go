@@ -1927,6 +1927,8 @@ func (f *Font) applyGPOSLookup(glyphs []Glyph, lookupOff int) {
 			f.applyGPOSPairAdjust(glyphs, subtableOff)
 		case 4:
 			f.applyGPOSMarkToBase(glyphs, subtableOff)
+		case 5:
+			f.applyGPOSMarkToLigature(glyphs, subtableOff)
 		case 6:
 			f.applyGPOSMarkToMark(glyphs, subtableOff)
 		case 9:
@@ -1955,6 +1957,8 @@ func (f *Font) applyGPOSExtension(glyphs []Glyph, subtableOff int) {
 		f.applyGPOSPairAdjust(glyphs, realOff)
 	case 4:
 		f.applyGPOSMarkToBase(glyphs, realOff)
+	case 5:
+		f.applyGPOSMarkToLigature(glyphs, realOff)
 	case 6:
 		f.applyGPOSMarkToMark(glyphs, realOff)
 	}
@@ -2061,6 +2065,123 @@ func (f *Font) applyGPOSMarkToMark(glyphs []Glyph, subtableOff int) {
 			break
 		}
 	}
+}
+
+// applyGPOSMarkToLigature applies GPOS type 5 (mark-to-ligature attachment).
+// Like mark-to-base but the ligature has per-component anchor arrays.
+// Each ligature glyph provides componentCount rows of anchors.
+func (f *Font) applyGPOSMarkToLigature(glyphs []Glyph, subtableOff int) {
+	// MarkLigature subtable (format 1):
+	//   u16 format
+	//   u16 markCoverageOffset
+	//   u16 ligatureCoverageOffset
+	//   u16 markClassCount
+	//   u16 markArrayOffset
+	//   u16 ligatureArrayOffset
+	if subtableOff+12 > len(f.data) {
+		return
+	}
+	format := readU16BE(f.data, subtableOff)
+	if format != 1 {
+		return
+	}
+	markCovOff := subtableOff + int(readU16BE(f.data, subtableOff+2))
+	ligCovOff := subtableOff + int(readU16BE(f.data, subtableOff+4))
+	markClassCount := int(readU16BE(f.data, subtableOff+6))
+	markArrayOff := subtableOff + int(readU16BE(f.data, subtableOff+8))
+	ligArrayOff := subtableOff + int(readU16BE(f.data, subtableOff+10))
+
+	for i := range glyphs {
+		markCovIdx := f.coverageIndex(markCovOff, glyphs[i].ID)
+		if markCovIdx < 0 {
+			continue
+		}
+
+		// Find preceding ligature glyph (skip marks).
+		var advSinceBaseX, advSinceBaseY int32
+		for j := i - 1; j >= 0; j-- {
+			cls := f.glyphClassDef(glyphs[j].ID)
+			if cls != glyphClassMark {
+				advSinceBaseX += glyphs[j].AdvanceX
+				advSinceBaseY += glyphs[j].AdvanceY
+			}
+			if cls == glyphClassLigature || cls == glyphClassBase || cls == glyphClassZero {
+				ligCovIdx := f.coverageIndex(ligCovOff, glyphs[j].ID)
+				if ligCovIdx >= 0 {
+					f.attachMarkToLigature(glyphs, i, j, markArrayOff, markCovIdx, ligArrayOff, ligCovIdx, markClassCount, advSinceBaseX, advSinceBaseY)
+				}
+				break
+			}
+		}
+	}
+}
+
+// attachMarkToLigature positions a mark on a specific component of a ligature glyph.
+func (f *Font) attachMarkToLigature(glyphs []Glyph, markIdx, ligIdx int, markArrayOff, markCovIdx, ligArrayOff, ligCovIdx, markClassCount int, advSinceX, advSinceY int32) {
+	// Read mark class and anchor.
+	if markArrayOff+2 > len(f.data) {
+		return
+	}
+	markCount := int(readU16BE(f.data, markArrayOff))
+	if markCovIdx >= markCount {
+		return
+	}
+	markRecOff := markArrayOff + 2 + markCovIdx*4
+	if markRecOff+4 > len(f.data) {
+		return
+	}
+	markClass := int(readU16BE(f.data, markRecOff))
+	markAnchorOff := markArrayOff + int(readU16BE(f.data, markRecOff+2))
+	if markClass >= markClassCount {
+		return
+	}
+
+	// LigatureArray:
+	//   u16 ligatureCount
+	//   u16 ligatureAttachOffsets[ligatureCount] (from start of LigatureArray)
+	if ligArrayOff+2 > len(f.data) {
+		return
+	}
+	ligCount := int(readU16BE(f.data, ligArrayOff))
+	if ligCovIdx >= ligCount {
+		return
+	}
+	ligAttachRelOff := int(readU16BE(f.data, ligArrayOff+2+ligCovIdx*2))
+	ligAttachOff := ligArrayOff + ligAttachRelOff
+
+	// LigatureAttach:
+	//   u16 componentCount
+	//   ComponentRecord[componentCount]:
+	//     u16 anchorOffsets[markClassCount] (from start of LigatureAttach)
+	if ligAttachOff+2 > len(f.data) {
+		return
+	}
+	componentCount := int(readU16BE(f.data, ligAttachOff))
+	if componentCount == 0 {
+		return
+	}
+
+	// Use last component as default (most common for trailing marks).
+	// TODO: track ligature component index per glyph for precise placement.
+	compIdx := componentCount - 1
+
+	anchorRelOffPos := ligAttachOff + 2 + compIdx*markClassCount*2 + markClass*2
+	if anchorRelOffPos+2 > len(f.data) {
+		return
+	}
+	anchorRelOff := int(readU16BE(f.data, anchorRelOffPos))
+	if anchorRelOff == 0 {
+		return
+	}
+	baseAnchorOff := ligAttachOff + anchorRelOff
+
+	markAnchorX, markAnchorY := readAnchor(f.data, markAnchorOff)
+	baseAnchorX, baseAnchorY := readAnchor(f.data, baseAnchorOff)
+
+	glyphs[markIdx].OffsetX = glyphs[ligIdx].OffsetX - advSinceX + int32(baseAnchorX) - int32(markAnchorX)
+	glyphs[markIdx].OffsetY = glyphs[ligIdx].OffsetY - advSinceY + int32(baseAnchorY) - int32(markAnchorY)
+	glyphs[markIdx].Flags |= GlyphFlagUsedInGPOS
+	glyphs[ligIdx].Flags |= GlyphFlagUsedInGPOS
 }
 
 // attachMark positions a mark glyph relative to a base glyph using anchor tables.

@@ -18,6 +18,19 @@ func loadTestFont(t *testing.T) *Font {
 	return f
 }
 
+func loadOpenSans(t *testing.T) *Font {
+	t.Helper()
+	data, err := os.ReadFile("testdata/OpenSans.ttf")
+	if err != nil {
+		t.Skipf("Open Sans not available: %v", err)
+	}
+	f, err := FontFromMemory(data, 0)
+	if err != nil {
+		t.Fatalf("FontFromMemory: %v", err)
+	}
+	return f
+}
+
 func loadTestFontData(t *testing.T) []byte {
 	t.Helper()
 	data, err := os.ReadFile("testdata/DejaVuSans.ttf")
@@ -1713,6 +1726,63 @@ func TestGPOSMarkFeatureLookups(t *testing.T) {
 	}
 	if !hasType6 {
 		t.Error("'mkmk' feature has no type 6 (mark-to-mark) lookups")
+	}
+}
+
+// TestGPOSMarkToLigature tests GPOS type 5 (mark-to-ligature) using Open Sans.
+// U+FB01 (precomposed fi ligature) + combining acute should position the accent
+// over the ligature via mark-to-ligature anchors.
+func TestGPOSMarkToLigature(t *testing.T) {
+	f := loadOpenSans(t)
+	var cfg ShapeConfig
+	cfg.Font = f
+
+	runs := cfg.ShapeSimple(nil, "\uFB01\u0301", DirectionLTR)
+	if len(runs) == 0 || len(runs[0].Glyphs) < 2 {
+		t.Fatal("expected at least 2 glyphs")
+	}
+
+	var mark Glyph
+	for _, g := range runs[0].Glyphs {
+		if g.Codepoint == 0x0301 {
+			mark = g
+		}
+	}
+	if mark.ID == 0 {
+		t.Fatal("combining acute not found")
+	}
+	if mark.OffsetX == 0 && mark.OffsetY == 0 {
+		t.Error("mark on ligature has zero offsets; GPOS mark-to-ligature (type 5) not applied")
+	}
+	if !mark.Flags.Has(GlyphFlagUsedInGPOS) {
+		t.Error("mark missing GlyphFlagUsedInGPOS")
+	}
+}
+
+// TestGPOSMarkFeatureHasType5 verifies Open Sans has mark-to-ligature lookups.
+func TestGPOSMarkFeatureHasType5(t *testing.T) {
+	f := loadOpenSans(t)
+	te := f.tables[tableGpos]
+	if te.length == 0 {
+		t.Skip("no GPOS")
+	}
+	base := int(te.offset)
+	lookupListOff := base + int(readU16BE(f.data, base+8))
+
+	var idxBuf [4]int
+	markIndices := f.findGPOSFeatureIndices(idxBuf[:0], FeatureTagMark)
+	hasType5 := false
+	for _, fi := range markIndices {
+		for _, li := range f.gposFeatureLookups(fi) {
+			lookupOff := lookupListOff + int(readU16BE(f.data, lookupListOff+2+int(li)*2))
+			lt := readU16BE(f.data, lookupOff)
+			if lt == 5 {
+				hasType5 = true
+			}
+		}
+	}
+	if !hasType5 {
+		t.Error("'mark' feature has no type 5 (mark-to-ligature) lookups")
 	}
 }
 
