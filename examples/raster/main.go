@@ -17,7 +17,7 @@ import (
 	"io"
 	"os"
 
-	"github.com/soypat/lefevre"
+	kb "github.com/soypat/lefevre"
 	"github.com/soypat/lefevre/raster"
 )
 
@@ -60,7 +60,7 @@ func run(args Flags) error {
 	if err != nil {
 		return err
 	}
-	font, err := lefevre.FontFromMemory(data, 0)
+	font, err := kb.FontFromMemory(data, 0)
 	if err != nil {
 		return err
 	}
@@ -98,7 +98,7 @@ func run(args Flags) error {
 	return nil
 }
 
-func glyphIDs(runes []rune, font *lefevre.Font) []uint16 {
+func glyphIDs(runes []rune, font *kb.Font) []uint16 {
 	ids := make([]uint16, len(runes))
 	for i, r := range runes {
 		ids[i] = font.GlyphID(r)
@@ -119,7 +119,7 @@ func fillBackground(img *image.NRGBA, col color.NRGBA) {
 	}
 }
 
-func drawText(img *image.NRGBA, atlas []byte, atlasW int, placements []raster.PackedGlyph, glyphs []uint16, font *lefevre.Font, scale float32, startX, baseline int, aa bool) {
+func drawText(img *image.NRGBA, atlas []byte, atlasW int, placements []raster.PackedGlyph, glyphs []uint16, font *kb.Font, scale float32, startX, baseline int, aa bool) {
 	penX := float32(startX)
 	penY := float32(baseline)
 	for i, gid := range glyphs {
