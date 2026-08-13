@@ -21,6 +21,7 @@ const (
 	tableName
 	tableLoca
 	tableGlyf
+	tablePost
 	tableCount
 )
 
@@ -28,6 +29,23 @@ const (
 type tableEntry struct {
 	offset uint32
 	length uint32
+}
+
+// tableRecord is one entry of the font's table directory, kept for every table
+// the file carries rather than only the ones parsed for shaping, so callers can
+// reach tables this package has no use for itself (post, cvt, fpgm, prep...).
+type tableRecord struct {
+	tag uint32
+	tableEntry
+}
+
+// tagOf packs a four-character table tag into its big-endian fourcc.
+// Returns 0 for anything that is not four bytes, which no table tag is.
+func tagOf(tag string) uint32 {
+	if len(tag) != 4 {
+		return 0
+	}
+	return uint32(tag[0])<<24 | uint32(tag[1])<<16 | uint32(tag[2])<<8 | uint32(tag[3])
 }
 
 // Big-endian reading helpers.
@@ -47,6 +65,7 @@ func readS16BE(data []byte, off int) int16 {
 // OpenType magic bytes.
 const (
 	magicTTF  = 0x00010000
+	magicTrue = 0x74727565 // 'true', the older Apple spelling of magicTTF
 	magicOTTO = 0x4F54544F // 'OTTO'
 	magicTTC  = 0x74746366 // 'ttcf'
 )
@@ -58,7 +77,7 @@ func fontCount(data []byte) int {
 	}
 	magic := readU32BE(data, 0)
 	switch magic {
-	case magicTTF, magicOTTO:
+	case magicTTF, magicTrue, magicOTTO:
 		return 1
 	case magicTTC:
 		if len(data) < 12 {
@@ -70,22 +89,43 @@ func fontCount(data []byte) int {
 	}
 }
 
-// Known OpenType table tags (big-endian fourcc).
-var tableTagMap = map[uint32]int{
-	0x68656164: tableHead, // 'head'
-	0x636D6170: tableCmap, // 'cmap'
-	0x47444546: tableGdef, // 'GDEF'
-	0x47535542: tableGsub, // 'GSUB'
-	0x47504F53: tableGpos, // 'GPOS'
-	0x68686561: tableHhea, // 'hhea'
-	0x76686561: tableVhea, // 'vhea'
-	0x686D7478: tableHmtx, // 'hmtx'
-	0x766D7478: tableVmtx, // 'vmtx'
-	0x6D617870: tableMaxp, // 'maxp'
-	0x4F532F32: tableOS2,  // 'OS/2'
-	0x6E616D65: tableName, // 'name'
-	0x6C6F6361: tableLoca, // 'loca'
-	0x676C7966: tableGlyf, // 'glyf'
+// tableIndex maps a table's big-endian fourcc to its slot in Font.tables.
+// Returns tableCount for a table this package does not parse itself; those are
+// still recorded in the directory and reachable through [Font.Table].
+func tableIndex(tag uint32) int {
+	switch tag {
+	case 0x68656164: // 'head'
+		return tableHead
+	case 0x636D6170: // 'cmap'
+		return tableCmap
+	case 0x47444546: // 'GDEF'
+		return tableGdef
+	case 0x47535542: // 'GSUB'
+		return tableGsub
+	case 0x47504F53: // 'GPOS'
+		return tableGpos
+	case 0x68686561: // 'hhea'
+		return tableHhea
+	case 0x76686561: // 'vhea'
+		return tableVhea
+	case 0x686D7478: // 'hmtx'
+		return tableHmtx
+	case 0x766D7478: // 'vmtx'
+		return tableVmtx
+	case 0x6D617870: // 'maxp'
+		return tableMaxp
+	case 0x4F532F32: // 'OS/2'
+		return tableOS2
+	case 0x6E616D65: // 'name'
+		return tableName
+	case 0x6C6F6361: // 'loca'
+		return tableLoca
+	case 0x676C7966: // 'glyf'
+		return tableGlyf
+	case 0x706F7374: // 'post'
+		return tablePost
+	}
+	return tableCount
 }
 
 // fontFromMemory parses a font from raw bytes.
@@ -97,7 +137,7 @@ func fontFromMemory(data []byte, fontIndex int) (*Font, error) {
 	magic := readU32BE(data, 0)
 	var dirOffset int
 	switch magic {
-	case magicTTF, magicOTTO:
+	case magicTTF, magicTrue, magicOTTO:
 		if fontIndex != 0 {
 			return nil, fmt.Errorf("kbts: font index %d out of range (single font file)", fontIndex)
 		}
@@ -126,7 +166,7 @@ func fontFromMemory(data []byte, fontIndex int) (*Font, error) {
 		return nil, fmt.Errorf("kbts: table records truncated")
 	}
 
-	f := &Font{data: data}
+	f := &Font{data: data, dir: make([]tableRecord, 0, numTables)}
 	for i := 0; i < numTables; i++ {
 		recOff := recordsStart + i*16
 		tag := readU32BE(data, recOff)
@@ -136,8 +176,15 @@ func fontFromMemory(data []byte, fontIndex int) (*Font, error) {
 		if uint64(tblOffset)+uint64(tblLength) > uint64(len(data)) {
 			continue // skip tables that extend beyond file
 		}
-		if id, ok := tableTagMap[tag]; ok {
-			f.tables[id] = tableEntry{offset: tblOffset, length: tblLength}
+		if int(tblOffset) < recordsStart+numTables*16 {
+			// A table's bytes come after the records describing them, so a
+			// record pointing into the directory names no table. kb agrees.
+			continue
+		}
+		entry := tableEntry{offset: tblOffset, length: tblLength}
+		f.dir = append(f.dir, tableRecord{tag: tag, tableEntry: entry})
+		if id := tableIndex(tag); id != tableCount {
+			f.tables[id] = entry
 		}
 	}
 
@@ -316,6 +363,7 @@ func (f *Font) fontInfo() FontInfo {
 	f.readHeadTable(&info)
 	f.readOS2Table(&info)
 	f.readHheaTable(&info)
+	f.readPostTable(&info)
 	return info
 }
 
@@ -468,6 +516,25 @@ func (f *Font) readOS2Table(info *FontInfo) {
 	if te.length >= 90 {
 		info.CapHeight = readS16BE(f.data, base+88)
 	}
+}
+
+// readPostTable reads the glyph-shape metadata every post version carries in
+// its header, which is all of it this package has a use for: the version 2.0
+// glyph name index that follows is not metadata.
+func (f *Font) readPostTable(info *FontInfo) {
+	te := f.tables[tablePost]
+	if te.length < 16 {
+		return
+	}
+	base := int(te.offset)
+	if base+16 > len(f.data) {
+		return
+	}
+	// italicAngle is a 16.16 fixed-point count of degrees.
+	info.ItalicAngle = float64(int32(readU32BE(f.data, base+4))) / 65536
+	info.UnderlinePosition = readS16BE(f.data, base+8)
+	info.UnderlineThickness = readS16BE(f.data, base+10)
+	info.IsFixedPitch = readU32BE(f.data, base+12) != 0
 }
 
 func (f *Font) readHheaTable(info *FontInfo) {
@@ -2387,17 +2454,27 @@ func (f *Font) applyPairAdjustFormat2(glyphs []Glyph, subtableOff int, coverageO
 	}
 }
 
+// numGlyphs returns the glyph count declared by the maxp table.
+func (f *Font) numGlyphs() int {
+	if !f.IsValid() {
+		return 0
+	}
+	maxp := f.tables[tableMaxp]
+	if maxp.length < 6 || int(maxp.offset)+6 > len(f.data) {
+		return 0
+	}
+	return int(readU16BE(f.data, int(maxp.offset)+4))
+}
+
 // glyphDataRange returns the byte offset and length within the glyf table for a glyph.
 // Returns (0, 0) for empty glyphs (e.g., space) or invalid glyph IDs.
 func (f *Font) glyphDataRange(glyphID uint16) (off, length uint32) {
 	loca := f.tables[tableLoca]
 	glyf := f.tables[tableGlyf]
-	maxp := f.tables[tableMaxp]
-	if loca.length == 0 || glyf.length == 0 || maxp.length < 6 {
+	if loca.length == 0 || glyf.length == 0 {
 		return 0, 0
 	}
-	numGlyphs := int(readU16BE(f.data, int(maxp.offset)+4))
-	if int(glyphID) >= numGlyphs {
+	if int(glyphID) >= f.numGlyphs() {
 		return 0, 0
 	}
 
@@ -2462,7 +2539,9 @@ func (f *Font) glyphOutlineDepth(dst []Segment, glyphID uint16, depth int, dx, d
 	if depth >= maxCompositeDepth {
 		return dst
 	}
-	return f.parseCompositeGlyphOutline(dst, p, depth, dx, dy)
+	// The component list ends where the record does, so the walk is confined to
+	// it: damaged mid-list it must stop, in step with AppendGlyphComponents.
+	return f.parseCompositeGlyphOutline(dst, f.data[:int(off)+int(length)], p, depth, dx, dy)
 }
 
 func (f *Font) parseSimpleGlyphOutline(dst []Segment, p int, nContours int, dx, dy int16) []Segment {
@@ -2652,51 +2731,61 @@ const (
 	compWeHaveATwoByTwo  = 1 << 7
 )
 
-func (f *Font) parseCompositeGlyphOutline(dst []Segment, p int, depth int, dx, dy int16) []Segment {
-	data := f.data
-	for {
+// nextComponent decodes the component record at data[p:]: its glyph id, its
+// placement, where the next starts, whether more follow. ok is false if cut off.
+func nextComponent(data []byte, p int) (glyphIdx uint16, cdx, cdy int16, next int, more, ok bool) {
+	if p+4 > len(data) {
+		return 0, 0, 0, 0, false, false
+	}
+	cflags := readU16BE(data, p)
+	glyphIdx = readU16BE(data, p+2)
+	p += 4
+
+	if cflags&compArg1And2AreWords != 0 {
 		if p+4 > len(data) {
-			break
+			return 0, 0, 0, 0, false, false
 		}
-		cflags := readU16BE(data, p)
-		glyphIdx := readU16BE(data, p+2)
+		if cflags&compArgsAreXYValues != 0 {
+			cdx = readS16BE(data, p)
+			cdy = readS16BE(data, p+2)
+		}
 		p += 4
-
-		var cdx, cdy int16
-		if cflags&compArg1And2AreWords != 0 {
-			if p+4 > len(data) {
-				break
-			}
-			if cflags&compArgsAreXYValues != 0 {
-				cdx = readS16BE(data, p)
-				cdy = readS16BE(data, p+2)
-			}
-			p += 4
-		} else {
-			if p+2 > len(data) {
-				break
-			}
-			if cflags&compArgsAreXYValues != 0 {
-				cdx = int16(int8(data[p]))
-				cdy = int16(int8(data[p+1]))
-			}
-			p += 2
+	} else {
+		if p+2 > len(data) {
+			return 0, 0, 0, 0, false, false
 		}
-
-		// Skip scale/matrix data.
-		if cflags&compWeHaveAScale != 0 {
-			p += 2
-		} else if cflags&compWeHaveAnXYScale != 0 {
-			p += 4
-		} else if cflags&compWeHaveATwoByTwo != 0 {
-			p += 8
+		if cflags&compArgsAreXYValues != 0 {
+			cdx = int16(int8(data[p]))
+			cdy = int16(int8(data[p+1]))
 		}
+		p += 2
+	}
 
-		dst = f.glyphOutlineDepth(dst, glyphIdx, depth+1, dx+cdx, dy+cdy)
+	// Skip scale/matrix data.
+	if cflags&compWeHaveAScale != 0 {
+		p += 2
+	} else if cflags&compWeHaveAnXYScale != 0 {
+		p += 4
+	} else if cflags&compWeHaveATwoByTwo != 0 {
+		p += 8
+	}
 
-		if cflags&compMoreComponents == 0 {
+	return glyphIdx, cdx, cdy, p, cflags&compMoreComponents != 0, true
+}
+
+// parseCompositeGlyphOutline walks the component records at data[p:], which is
+// the font truncated to the end of the composite's own glyph record.
+func (f *Font) parseCompositeGlyphOutline(dst []Segment, data []byte, p int, depth int, dx, dy int16) []Segment {
+	for {
+		glyphIdx, cdx, cdy, next, more, ok := nextComponent(data, p)
+		if !ok {
 			break
 		}
+		dst = f.glyphOutlineDepth(dst, glyphIdx, depth+1, dx+cdx, dy+cdy)
+		if !more {
+			break
+		}
+		p = next
 	}
 	return dst
 }

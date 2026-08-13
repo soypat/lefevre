@@ -322,12 +322,18 @@ type FontInfo struct {
 	Ascent, Descent        int16
 	LineGap                int16
 	CapHeight              int16
+	// italic angle in degrees counter-clockwise from vertical
+	ItalicAngle        float64
+	UnderlinePosition  int16
+	UnderlineThickness int16
+	IsFixedPitch       bool
 }
 
 // Font is a parsed font resource. Create with FontFromMemory.
 type Font struct {
 	data       []byte                 // retained reference to raw font bytes; must not be modified after parse
-	tables     [tableCount]tableEntry // parsed table directory
+	tables     [tableCount]tableEntry // tables this package parses, indexed for direct access
+	dir        []tableRecord          // every table the file carries, in directory order
 	cmapFormat uint16                 // selected cmap subtable format (4 or 12)
 	cmapOffset uint32                 // absolute offset of selected cmap subtable in data
 	err        error                  // sticky parse error
@@ -380,6 +386,89 @@ func (f *Font) GlyphBounds(glyphID uint16) (xMin, yMin, xMax, yMax int16) {
 // Returns dst unchanged if the glyph has no outline (e.g., space).
 func (f *Font) GlyphOutline(dst []Segment, glyphID uint16) []Segment {
 	return f.glyphOutline(dst, glyphID)
+}
+
+// OutlineFormat reports which kind of outlines a font carries. It is what
+// separates a font that can be subset by copying glyph records from one whose
+// outlines live in a CFF charstring index and cannot.
+type OutlineFormat uint8
+
+const (
+	// OutlineNone is a font with no outlines this package recognizes, or an
+	// invalid font.
+	OutlineNone OutlineFormat = iota
+	// OutlineGlyf is TrueType quadratic outlines in a glyf/loca table pair.
+	OutlineGlyf
+	// OutlineCFF is PostScript cubic outlines in a CFF or CFF2 table.
+	OutlineCFF
+)
+
+// OutlineFormat reports the outline table this font carries.
+func (f *Font) OutlineFormat() OutlineFormat {
+	if !f.IsValid() {
+		return OutlineNone
+	}
+	switch {
+	case f.tables[tableGlyf].length != 0 && f.tables[tableLoca].length != 0:
+		return OutlineGlyf
+	case f.Table("CFF ") != nil || f.Table("CFF2") != nil:
+		return OutlineCFF
+	}
+	return OutlineNone
+}
+
+// Table returns the bytes of any four-character named table ("cvt " has a
+// trailing space), nil if absent or empty. Aliases data; must not be modified.
+func (f *Font) Table(tag string) []byte {
+	if !f.IsValid() {
+		return nil
+	}
+	want := tagOf(tag)
+	if want == 0 {
+		return nil
+	}
+	for i := range f.dir {
+		if rec := &f.dir[i]; rec.tag == want && rec.length != 0 {
+			return f.data[rec.offset : rec.offset+rec.length]
+		}
+	}
+	return nil
+}
+
+// NumGlyphs returns the number of glyphs the font declares, 0 if invalid.
+func (f *Font) NumGlyphs() int {
+	return f.numGlyphs()
+}
+
+// GlyphData returns glyphID's raw glyf record — first two bytes the contour
+// count, negative if composite — nil if empty or out of range. Do not modify.
+func (f *Font) GlyphData(glyphID uint16) []byte {
+	off, length := f.glyphDataRange(glyphID)
+	if length == 0 || int(off)+int(length) > len(f.data) {
+		return nil
+	}
+	return f.data[off : off+length]
+}
+
+// AppendGlyphComponents appends the glyph ids glyphID is assembled from, without
+// recursing: a component may be a composite. A simple glyph appends nothing.
+func (f *Font) AppendGlyphComponents(dst []uint16, glyphID uint16) []uint16 {
+	g := f.GlyphData(glyphID)
+	if len(g) < 10 || readS16BE(g, 0) >= 0 {
+		return dst // Empty, or a simple glyph with a non-negative contour count.
+	}
+	for p := 10; ; {
+		comp, _, _, next, more, ok := nextComponent(g, p)
+		if !ok {
+			break
+		}
+		dst = append(dst, comp)
+		if !more {
+			break
+		}
+		p = next
+	}
+	return dst
 }
 
 // BreakConfigFlags controls break generation behavior.
