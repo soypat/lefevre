@@ -130,8 +130,9 @@ func TestCompositeComponentsStopAtTheRecordEnd(t *testing.T) {
 		simpleGlyph(1),        // gid3: mentioned by nobody
 	})
 
-	if got := f.AppendGlyphComponents(nil, 1); len(got) != 1 || got[0] != 2 {
-		t.Fatalf("AppendGlyphComponents(1) = %v, want [2]: the record declares one component", got)
+	var s sfnt.Subsetter
+	if got := s.AppendClosure(nil, f, []uint16{1}); len(got) != 2 || got[0] != 1 || got[1] != 2 {
+		t.Fatalf("AppendClosure(1) = %v, want [1 2]: the record declares one component", got)
 	}
 	// gid1 places gid2 at 0,0 and stops, so it draws exactly what gid2 draws.
 	want := f.GlyphOutline(nil, 2)

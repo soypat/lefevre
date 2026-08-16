@@ -123,48 +123,29 @@ func loadRaw(t *testing.T, name string) (*lefevre.Font, []byte, error) {
 	return f, data, nil
 }
 
-// Subsetting reads composition out of the glyph record; lefevre reads it out of
-// the same record, independently. Over every glyph of two real fonts the two
-// agree, which is what makes AppendGlyphComponents a method Source need not ask
-// for.
-func TestClosureMatchesFontComponents(t *testing.T) {
+// Every glyph of two real fonts closes over ids the font actually carries, and
+// some glyph in each is composite: the walk is exercised, not merely run.
+func TestClosureOverWholeFont(t *testing.T) {
 	for _, name := range []string{"DejaVuSans.ttf", "OpenSans.ttf"} {
 		t.Run(name, func(t *testing.T) {
 			f, _ := loadFont(t, name)
 			var s sfnt.Subsetter
-			var want, stack []uint16
-			seen := make([]bool, f.NumGlyphs())
 			composites := 0
 			for gid := range f.NumGlyphs() {
-				// The closure of gid, walked with the font's own component call.
-				clear(seen)
-				want, stack = want[:0], append(stack[:0], uint16(gid))
-				seen[gid] = true
-				for len(stack) > 0 {
-					g := stack[len(stack)-1]
-					stack = stack[:len(stack)-1]
-					n := len(stack)
-					stack = f.AppendGlyphComponents(stack, g)
-					w := n
-					for _, comp := range stack[n:] {
-						if int(comp) < len(seen) && !seen[comp] {
-							seen[comp] = true
-							stack[w] = comp
-							w++
-						}
-					}
-					stack = stack[:w]
+				got := s.AppendClosure(nil, f, []uint16{uint16(gid)})
+				if !slices.Contains(got, uint16(gid)) {
+					t.Fatalf("AppendClosure(glyph %d) = %v, want it to hold the glyph itself", gid, got)
 				}
-				for id, kept := range seen {
-					if kept {
-						want = append(want, uint16(id))
+				if !slices.IsSorted(got) {
+					t.Fatalf("AppendClosure(glyph %d) = %v, want ascending ids", gid, got)
+				}
+				for _, id := range got {
+					if int(id) >= f.NumGlyphs() {
+						t.Fatalf("AppendClosure(glyph %d) = %v, want no id past the font's %d glyphs", gid, got, f.NumGlyphs())
 					}
 				}
-				if len(want) > 1 {
+				if len(got) > 1 {
 					composites++
-				}
-				if got := s.AppendClosure(nil, f, []uint16{uint16(gid)}); !slices.Equal(got, want) {
-					t.Fatalf("AppendClosure(glyph %d) = %v, want %v", gid, got, want)
 				}
 			}
 			if composites == 0 {

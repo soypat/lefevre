@@ -109,8 +109,9 @@ func TestSubsetKeepsCompositeComponents(t *testing.T) {
 	if acute == 0 {
 		t.Skip("test font has no 'é'")
 	}
-	comps := src.AppendGlyphComponents(nil, acute)
-	if len(comps) == 0 {
+	var s sfnt.Subsetter
+	comps := s.AppendClosure(nil, src, []uint16{acute})
+	if len(comps) < 2 {
 		t.Skip("'é' is not a composite in the test font")
 	}
 	_, sub, _ := subset(t, "DejaVuSans.ttf", "é", nil)
@@ -219,7 +220,8 @@ func TestAppendClosureIsTransitive(t *testing.T) {
 	if !slices.IsSorted(got) {
 		t.Errorf("AppendClosure = %v, want ascending glyph ids", got)
 	}
-	want := append(src.AppendGlyphComponents(nil, acute), acute)
+	// 'é' is drawn as 'e' plus an accent, so the closure holds both it and 'e'.
+	want := []uint16{acute, src.GlyphID('e')}
 	for _, w := range want {
 		if !slices.Contains(got, w) {
 			t.Errorf("AppendClosure = %v, want it to include %d", got, w)

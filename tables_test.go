@@ -146,48 +146,35 @@ func TestGlyphDataIsTheOutlineRecord(t *testing.T) {
 	}
 }
 
-func TestAppendGlyphComponentsFindsCompositeParts(t *testing.T) {
+// A composite glyph draws its components: 'é' is 'e' plus an accent, so its
+// outline carries every contour 'e' has and one more.
+func TestGlyphOutlineFlattensComposite(t *testing.T) {
 	f := loadTestFont(t)
-	// 'é' is composed of 'e' and an acute accent in every font that has it.
-	gid := f.GlyphID('é')
-	if gid == 0 {
-		t.Skip("font has no 'é'")
+	gid, e := f.GlyphID('é'), f.GlyphID('e')
+	if gid == 0 || e == 0 {
+		t.Skip("font has no 'é' or no 'e'")
 	}
 	g := f.GlyphData(gid)
 	if len(g) < 2 || readS16BE(g, 0) >= 0 {
 		t.Skip("'é' is not a composite in this font")
 	}
-	comps := f.AppendGlyphComponents(nil, gid)
-	if len(comps) < 2 {
-		t.Fatalf("AppendGlyphComponents(é) = %v, want at least a base and an accent", comps)
+	acute, base := contourCount(f.GlyphOutline(nil, gid)), contourCount(f.GlyphOutline(nil, e))
+	if base == 0 {
+		t.Fatal("GlyphOutline('e') has no contours")
 	}
-	e := f.GlyphID('e')
-	if e == 0 {
-		t.Fatal("font has no 'e'")
-	}
-	found := false
-	for _, c := range comps {
-		if c == e {
-			found = true
-		}
-		if int(c) >= f.NumGlyphs() {
-			t.Errorf("component %d is out of range (%d glyphs)", c, f.NumGlyphs())
-		}
-	}
-	if !found {
-		t.Errorf("AppendGlyphComponents(é) = %v, want it to include 'e' (%d)", comps, e)
+	if acute <= base {
+		t.Errorf("GlyphOutline('é') has %d contours, 'e' has %d: the accent was not drawn", acute, base)
 	}
 }
 
-func TestAppendGlyphComponentsOnSimpleGlyph(t *testing.T) {
-	f := loadTestFont(t)
-	dst := []uint16{7} // a non-empty dst must come back untouched
-	for _, r := range []rune{'A', 'e', ' '} {
-		got := f.AppendGlyphComponents(dst, f.GlyphID(r))
-		if len(got) != 1 || got[0] != 7 {
-			t.Errorf("AppendGlyphComponents(%q) = %v, want the dst unchanged", r, got)
+func contourCount(segs []Segment) int {
+	n := 0
+	for _, s := range segs {
+		if s.Op == SegmentMoveTo {
+			n++
 		}
 	}
+	return n
 }
 
 func TestOutlineFormat(t *testing.T) {

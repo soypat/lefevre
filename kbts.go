@@ -484,6 +484,7 @@ func (f *Font) OutlineFormat() OutlineFormat {
 
 // Table returns the bytes of any four-character named table ("cvt " has a
 // trailing space), nil if absent or empty. Aliases data; must not be modified.
+// See [sfnt.Subsetter] for an approach to accessing the underlying structured data.
 func (f *Font) Table(tag string) []byte {
 	if !f.IsValid() {
 		return nil
@@ -501,39 +502,20 @@ func (f *Font) Table(tag string) []byte {
 }
 
 // NumGlyphs returns the number of glyphs the font declares, 0 if invalid.
+// See [sfnt.Subsetter] for an approach to accessing the underlying structured data.
 func (f *Font) NumGlyphs() int {
 	return f.numGlyphs()
 }
 
 // GlyphData returns glyphID's raw glyf record — first two bytes the contour
 // count, negative if composite — nil if empty or out of range. Do not modify.
+// See [sfnt.Subsetter] for an approach to accessing the underlying structured data.
 func (f *Font) GlyphData(glyphID uint16) []byte {
 	off, length := f.glyphDataRange(glyphID)
 	if length == 0 || int(off)+int(length) > len(f.data) {
 		return nil
 	}
 	return f.data[off : off+length]
-}
-
-// AppendGlyphComponents appends the glyph ids glyphID is assembled from, without
-// recursing: a component may be a composite. A simple glyph appends nothing.
-func (f *Font) AppendGlyphComponents(dst []uint16, glyphID uint16) []uint16 {
-	g := f.GlyphData(glyphID)
-	if len(g) < 10 || readS16BE(g, 0) >= 0 {
-		return dst // Empty, or a simple glyph with a non-negative contour count.
-	}
-	for p := 10; ; {
-		comp, _, _, next, more, ok := nextComponent(g, p)
-		if !ok {
-			break
-		}
-		dst = append(dst, comp)
-		if !more {
-			break
-		}
-		p = next
-	}
-	return dst
 }
 
 // BreakConfigFlags controls break generation behavior.
