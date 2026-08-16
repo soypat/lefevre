@@ -207,7 +207,8 @@ func TestFontInfoReadsPostTable(t *testing.T) {
 	if len(post) < 32 {
 		t.Skip("font has no post table")
 	}
-	info := f.Info()
+	var info FontInfo
+	f.ReadInfo(&info)
 	wantAngle := float64(int32(readU32BE(post, 4))) / 65536
 	if info.ItalicAngle != wantAngle {
 		t.Errorf("ItalicAngle = %v, want %v", info.ItalicAngle, wantAngle)

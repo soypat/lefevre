@@ -6,8 +6,8 @@ import (
 
 func TestPack_FitsASCII(t *testing.T) {
 	f := loadTestFont(t)
-	info := f.Info()
-	scale := float32(16) / float32(info.UnitsPerEm)
+	upem := f.UnitsPerEm()
+	scale := float32(16) / float32(upem)
 	cfg := PackConfig{Font: f, Scale: scale, Padding: 1}
 
 	// Printable ASCII: 32..126
@@ -27,8 +27,8 @@ func TestPack_FitsASCII(t *testing.T) {
 
 func TestPack_TooSmall(t *testing.T) {
 	f := loadTestFont(t)
-	info := f.Info()
-	scale := float32(32) / float32(info.UnitsPerEm)
+	upem := f.UnitsPerEm()
+	scale := float32(32) / float32(upem)
 	cfg := PackConfig{Font: f, Scale: scale, Padding: 1}
 
 	glyphs := make([]uint16, 95)
@@ -44,8 +44,8 @@ func TestPack_TooSmall(t *testing.T) {
 
 func TestPack_NoPadOverlap(t *testing.T) {
 	f := loadTestFont(t)
-	info := f.Info()
-	scale := float32(16) / float32(info.UnitsPerEm)
+	upem := f.UnitsPerEm()
+	scale := float32(16) / float32(upem)
 	cfg := PackConfig{Font: f, Scale: scale, Padding: 1}
 
 	glyphs := make([]uint16, 26)
@@ -80,8 +80,8 @@ func TestPack_NoPadOverlap(t *testing.T) {
 
 func TestBakeAtlas_NonZeroCoverage(t *testing.T) {
 	f := loadTestFont(t)
-	info := f.Info()
-	scale := float32(16) / float32(info.UnitsPerEm)
+	upem := f.UnitsPerEm()
+	scale := float32(16) / float32(upem)
 	cfg := PackConfig{Font: f, Scale: scale, Padding: 1}
 
 	glyphs := []uint16{f.GlyphID('A'), f.GlyphID('B'), f.GlyphID('C')}
@@ -108,8 +108,8 @@ func TestBakeAtlas_NonZeroCoverage(t *testing.T) {
 
 func TestPack_PopulatesGlyphMetrics(t *testing.T) {
 	f := loadTestFont(t)
-	info := f.Info()
-	scale := float32(32) / float32(info.UnitsPerEm)
+	upem := f.UnitsPerEm()
+	scale := float32(32) / float32(upem)
 	cfg := PackConfig{Font: f, Scale: scale, Padding: 1}
 
 	glyphs := []uint16{f.GlyphID('A')}
@@ -132,8 +132,8 @@ func TestPack_PopulatesGlyphMetrics(t *testing.T) {
 
 func TestBakeAtlas_CoverageStaysInsideRect(t *testing.T) {
 	f := loadTestFont(t)
-	info := f.Info()
-	scale := float32(24) / float32(info.UnitsPerEm)
+	upem := f.UnitsPerEm()
+	scale := float32(24) / float32(upem)
 	cfg := PackConfig{Font: f, Scale: scale, Padding: 2}
 
 	glyphs := []uint16{f.GlyphID('A'), f.GlyphID('g'), f.GlyphID('M')}
@@ -165,8 +165,8 @@ func TestBakeAtlas_CoverageStaysInsideRect(t *testing.T) {
 
 func TestPack_AppendsToExisting(t *testing.T) {
 	f := loadTestFont(t)
-	info := f.Info()
-	scale := float32(16) / float32(info.UnitsPerEm)
+	upem := f.UnitsPerEm()
+	scale := float32(16) / float32(upem)
 	cfg := PackConfig{Font: f, Scale: scale, Padding: 1}
 
 	sentinel := PackedGlyph{GlyphID: 9999}

@@ -22,7 +22,8 @@ func TestFontAccessors(t *testing.T) {
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			f := tt.load(t)
-			info := f.Info()
+			var info FontInfo
+			f.ReadInfo(&info)
 
 			if got := f.UnitsPerEm(); got != tt.unitsPerEm {
 				t.Errorf("UnitsPerEm() = %d, want %d", got, tt.unitsPerEm)
@@ -91,11 +92,12 @@ func TestInfoDoesNotAllocate(t *testing.T) {
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			f := tt.load(t)
+			var info FontInfo
 			allocs := testing.AllocsPerRun(100, func() {
-				_ = f.Info()
+				f.ReadInfo(&info)
 			})
 			if allocs != 0 {
-				t.Errorf("Info() allocates %v times per call, want 0", allocs)
+				t.Errorf("ReadInfo allocates %v times per call, want 0", allocs)
 			}
 		})
 	}
@@ -105,7 +107,8 @@ func TestInfoDoesNotAllocate(t *testing.T) {
 // Meaningful under -race; it is what keeps the FontInfo cache eager.
 func TestFontConcurrentReads(t *testing.T) {
 	f := loadTestFont(t)
-	want := f.Info()
+	var want FontInfo
+	f.ReadInfo(&want)
 	wantGID := f.GlyphID('A')
 	wantAdvance := f.GlyphAdvance(wantGID)
 
@@ -115,9 +118,10 @@ func TestFontConcurrentReads(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			var got FontInfo
 			for range 100 {
-				if got := f.Info(); got != want {
-					t.Errorf("Info() = %+v, want %+v", got, want)
+				if f.ReadInfo(&got); got != want {
+					t.Errorf("ReadInfo = %+v, want %+v", got, want)
 					return
 				}
 				if got := f.GlyphID('A'); got != wantGID {
@@ -161,7 +165,8 @@ func TestOS2RawClasses(t *testing.T) {
 		{"OpenSans", loadOpenSans, 400, 5, 1096},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			info := tt.load(t).Info()
+			var info FontInfo
+			tt.load(t).ReadInfo(&info)
 			if info.WeightClass != tt.weightClass {
 				t.Errorf("WeightClass = %d, want %d", info.WeightClass, tt.weightClass)
 			}

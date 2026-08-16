@@ -3,6 +3,8 @@ package lefevre
 import (
 	"fmt"
 	"unicode/utf16"
+
+	"github.com/soypat/lefevre/internal"
 )
 
 // OpenType table tag identifiers.
@@ -128,10 +130,29 @@ func tableIndex(tag uint32) int {
 	return tableCount
 }
 
-// fontFromMemory parses a font from raw bytes.
-func fontFromMemory(data []byte, fontIndex int) (*Font, error) {
+// LoadBytes loads TTF/OTF/TTC bytes into f, replacing the font f held and
+// reusing its memory. fontIndex picks the face in a collection, else 0. f keeps
+// data as a view, so it must outlive f and not change. A failed load leaves f
+// unusable, not half-read.
+func (f *Font) LoadBytes(data []byte, fontIndex int) error {
+	err := f.parse(data, fontIndex)
+	if err != nil {
+		f.reset()
+		f.err = err
+	}
+	return err
+}
+
+// reset returns f to its zero value, keeping the directory's memory to reuse.
+func (f *Font) reset() {
+	*f = Font{dir: f.dir[:0]}
+}
+
+// parse reads data's tables into f, leaving f partly filled on failure.
+func (f *Font) parse(data []byte, fontIndex int) error {
+	f.reset()
 	if len(data) < 12 {
-		return nil, fmt.Errorf("kbts: font data too short (%d bytes)", len(data))
+		return fmt.Errorf("kbts: font data too short (%d bytes)", len(data))
 	}
 
 	magic := readU32BE(data, 0)
@@ -139,34 +160,35 @@ func fontFromMemory(data []byte, fontIndex int) (*Font, error) {
 	switch magic {
 	case magicTTF, magicTrue, magicOTTO:
 		if fontIndex != 0 {
-			return nil, fmt.Errorf("kbts: font index %d out of range (single font file)", fontIndex)
+			return fmt.Errorf("kbts: font index %d out of range (single font file)", fontIndex)
 		}
 		dirOffset = 0
 	case magicTTC:
 		count := int(readU32BE(data, 8))
 		if fontIndex < 0 || fontIndex >= count {
-			return nil, fmt.Errorf("kbts: font index %d out of range (collection has %d fonts)", fontIndex, count)
+			return fmt.Errorf("kbts: font index %d out of range (collection has %d fonts)", fontIndex, count)
 		}
 		offTableStart := 12 + fontIndex*4
 		if offTableStart+4 > len(data) {
-			return nil, fmt.Errorf("kbts: TTC offset table truncated")
+			return fmt.Errorf("kbts: TTC offset table truncated")
 		}
 		dirOffset = int(readU32BE(data, offTableStart))
 	default:
-		return nil, fmt.Errorf("kbts: unrecognized font format (magic 0x%08X)", magic)
+		return fmt.Errorf("kbts: unrecognized font format (magic 0x%08X)", magic)
 	}
 
 	// Parse table directory.
 	if dirOffset+12 > len(data) {
-		return nil, fmt.Errorf("kbts: table directory truncated")
+		return fmt.Errorf("kbts: table directory truncated")
 	}
 	numTables := int(readU16BE(data, dirOffset+4))
 	recordsStart := dirOffset + 12
 	if recordsStart+numTables*16 > len(data) {
-		return nil, fmt.Errorf("kbts: table records truncated")
+		return fmt.Errorf("kbts: table records truncated")
 	}
 
-	f := &Font{data: data, dir: make([]tableRecord, 0, numTables)}
+	f.data = data
+	internal.SliceReuse(&f.dir, numTables)
 	for i := 0; i < numTables; i++ {
 		recOff := recordsStart + i*16
 		tag := readU32BE(data, recOff)
@@ -197,10 +219,10 @@ func fontFromMemory(data []byte, fontIndex int) (*Font, error) {
 	// Select cmap subtable.
 	f.selectCmap()
 
-	// Metadata is parsed once, here, rather than on every Info call
+	// Metadata is parsed once, here, rather than on every Info call.
 	f.info = f.fontInfo()
 
-	return f, nil
+	return nil
 }
 
 // tagName renders a table tag as its four characters, for error messages.

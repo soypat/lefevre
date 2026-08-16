@@ -31,7 +31,8 @@ func main() {
 	fmt.Printf("Valid: %v\n\n", f.IsValid())
 
 	// Font metadata from name, head, OS/2, and hhea tables.
-	info := f.Info()
+	var info kb.FontInfo
+	f.ReadInfo(&info)
 	fmt.Println("=== Font Info ===")
 	fmt.Printf("  Family:      %s\n", info.Family)
 	fmt.Printf("  Subfamily:   %s\n", info.Subfamily)

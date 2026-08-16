@@ -126,7 +126,8 @@ func TestFontIsValid_ZeroValue(t *testing.T) {
 
 func TestFontInfo_Family(t *testing.T) {
 	f := loadTestFont(t)
-	info := f.Info()
+	var info FontInfo
+	f.ReadInfo(&info)
 	if info.Family != "DejaVu Sans" {
 		t.Errorf("Family = %q, want %q", info.Family, "DejaVu Sans")
 	}
@@ -134,7 +135,8 @@ func TestFontInfo_Family(t *testing.T) {
 
 func TestFontInfo_Weight(t *testing.T) {
 	f := loadTestFont(t)
-	info := f.Info()
+	var info FontInfo
+	f.ReadInfo(&info)
 	if info.Weight == FontWeightUnknown {
 		t.Error("expected a known weight value, got FontWeightUnknown")
 	}
@@ -142,7 +144,8 @@ func TestFontInfo_Weight(t *testing.T) {
 
 func TestFontInfo_Metrics(t *testing.T) {
 	f := loadTestFont(t)
-	info := f.Info()
+	var info FontInfo
+	f.ReadInfo(&info)
 	if info.UnitsPerEm == 0 {
 		t.Error("expected UnitsPerEm > 0")
 	}
@@ -153,7 +156,8 @@ func TestFontInfo_Metrics(t *testing.T) {
 
 func TestFontInfo_ZeroValue(t *testing.T) {
 	var f Font
-	info := f.Info()
+	var info FontInfo
+	f.ReadInfo(&info)
 	if info.Family != "" {
 		t.Errorf("expected empty Family for zero Font, got %q", info.Family)
 	}

@@ -66,7 +66,7 @@ func run(args Flags) error {
 	}
 
 	const fontSize = 72
-	scale := float32(fontSize) / float32(font.Info().UnitsPerEm)
+	scale := float32(fontSize) / float32(font.UnitsPerEm())
 
 	textNoAA := "NO AA: " + args.Text
 	textAA := "   AA: " + args.Text

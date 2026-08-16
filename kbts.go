@@ -338,7 +338,9 @@ type FontInfo struct {
 	IsFixedPitch       bool
 }
 
-// Font is a parsed font resource. Create with FontFromMemory.
+// Font is a parsed font resource. The zero value is unloaded and ready for
+// [Font.LoadBytes], which may be called again to reuse the Font's memory.
+// Once parsed a Font is read-only, so several goroutines may read one.
 type Font struct {
 	data       []byte                 // retained reference to raw font bytes; must not be modified after parse
 	tables     [tableCount]tableEntry // tables this package parses, indexed for direct access
@@ -349,10 +351,14 @@ type Font struct {
 	err        error                  // sticky parse error
 }
 
-// FontFromMemory parses a font from raw TTF/OTF/TTC bytes.
-// fontIndex selects which font in a TTC/OTC collection (0-based). For single .ttf/.otf files, use 0.
+// FontFromMemory parses a font from raw TTF/OTF/TTC bytes into a new Font.
+// It is [Font.LoadBytes] for a caller with nothing to reuse.
 func FontFromMemory(data []byte, fontIndex int) (*Font, error) {
-	return fontFromMemory(data, fontIndex)
+	f := new(Font)
+	if err := f.LoadBytes(data, fontIndex); err != nil {
+		return nil, err
+	}
+	return f, nil
 }
 
 // FontCount returns the number of fonts in a TTC/OTF/TTF byte slice.
@@ -376,44 +382,39 @@ func (f *Font) Err() error {
 	return f.err
 }
 
-// Info returns metadata about the font, parsed once when the font was loaded.
-// Returns zero FontInfo if the font is invalid.
-func (f *Font) Info() FontInfo {
-	if f == nil {
-		return FontInfo{}
-	}
-	return f.info
+// ReadInfo reads metadata into info.
+func (f *Font) ReadInfo(info *FontInfo) {
+	*info = f.info
 }
 
 // UnitsPerEm is the design grid every metric this font reports is expressed in.
 // A point size scales them: advance * size / UnitsPerEm.
 func (f *Font) UnitsPerEm() int {
-	return int(f.Info().UnitsPerEm)
+	return int(f.info.UnitsPerEm)
 }
 
 // PostScriptName is the font's PostScript name, such as "Helvetica-Bold". It is
 // empty for a font whose name table carries no name ID 6.
 func (f *Font) PostScriptName() string {
-	return f.Info().PostScriptName
+	return f.info.PostScriptName
 }
 
 // Family reports the typographic family and subfamily, such as "Lato" and
 // "Semibold Italic", falling back to the basic name-table pair.
 func (f *Font) Family() (family, subfamily string) {
-	info := f.Info()
-	return info.TypographicFamily, info.TypographicSubfamily
+	return f.info.TypographicFamily, f.info.TypographicSubfamily
 }
 
 // Bounds is the box holding every glyph in the font, in font units.
 func (f *Font) Bounds() (xMin, yMin, xMax, yMax int16) {
-	info := f.Info()
+	info := &f.info
 	return info.XMin, info.YMin, info.XMax, info.YMax
 }
 
 // VMetrics reports the vertical metrics in font units. descent is negative,
 // below the baseline, and capHeight is zero for a font that declares none.
 func (f *Font) VMetrics() (ascent, descent, lineGap, capHeight int16) {
-	info := f.Info()
+	info := &f.info
 	return info.Ascent, info.Descent, info.LineGap, info.CapHeight
 }
 
@@ -422,7 +423,7 @@ func (f *Font) VMetrics() (ascent, descent, lineGap, capHeight int16) {
 // angle in degrees counter-clockwise from vertical, and whether every glyph
 // advances the same.
 func (f *Font) Style() (weight int, italicAngle float64, fixedPitch bool) {
-	info := f.Info()
+	info := &f.info
 	return int(info.WeightClass), info.ItalicAngle, info.IsFixedPitch
 }
 

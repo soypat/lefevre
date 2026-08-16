@@ -22,8 +22,8 @@ func sortedPlacements(t *testing.T, cfg PackConfig, glyphs []uint16) []PackedGly
 
 func TestBuildQuads_CountMatchesNonEmptyGlyphs(t *testing.T) {
 	f := loadTestFont(t)
-	info := f.Info()
-	scale := float32(32) / float32(info.UnitsPerEm)
+	upem := f.UnitsPerEm()
+	scale := float32(32) / float32(upem)
 	cfg := PackConfig{Font: f, Scale: scale, Padding: 1}
 
 	gA := f.GlyphID('A')
@@ -48,8 +48,8 @@ func TestBuildQuads_CountMatchesNonEmptyGlyphs(t *testing.T) {
 
 func TestBuildQuads_SrcRectMatchesPlacement(t *testing.T) {
 	f := loadTestFont(t)
-	info := f.Info()
-	scale := float32(32) / float32(info.UnitsPerEm)
+	upem := f.UnitsPerEm()
+	scale := float32(32) / float32(upem)
 	cfg := PackConfig{Font: f, Scale: scale, Padding: 1}
 
 	gA := f.GlyphID('A')
@@ -76,8 +76,8 @@ func TestBuildQuads_SrcRectMatchesPlacement(t *testing.T) {
 
 func TestBuildQuads_DstAppliesOriginAndPenOffsets(t *testing.T) {
 	f := loadTestFont(t)
-	info := f.Info()
-	scale := float32(32) / float32(info.UnitsPerEm)
+	upem := f.UnitsPerEm()
+	scale := float32(32) / float32(upem)
 	cfg := PackConfig{Font: f, Scale: scale, Padding: 1}
 
 	gA := f.GlyphID('A')
@@ -98,8 +98,8 @@ func TestBuildQuads_DstAppliesOriginAndPenOffsets(t *testing.T) {
 
 func TestBuildQuads_PenAdvancesBetweenGlyphs(t *testing.T) {
 	f := loadTestFont(t)
-	info := f.Info()
-	scale := float32(32) / float32(info.UnitsPerEm)
+	upem := f.UnitsPerEm()
+	scale := float32(32) / float32(upem)
 	cfg := PackConfig{Font: f, Scale: scale, Padding: 1}
 
 	gA := f.GlyphID('A')
@@ -127,8 +127,8 @@ func TestBuildQuads_PenAdvancesBetweenGlyphs(t *testing.T) {
 
 func TestBuildQuads_AppendsToExisting(t *testing.T) {
 	f := loadTestFont(t)
-	info := f.Info()
-	scale := float32(32) / float32(info.UnitsPerEm)
+	upem := f.UnitsPerEm()
+	scale := float32(32) / float32(upem)
 	cfg := PackConfig{Font: f, Scale: scale, Padding: 1}
 
 	gA := f.GlyphID('A')

@@ -59,7 +59,6 @@ func main() {
 		fmt.Fprintln(os.Stderr, "font parse error:", err)
 		os.Exit(1)
 	}
-	info := font.Info()
 
 	// Shape text.
 	dir, _ := kb.GuessTextProperties(text)
@@ -103,8 +102,8 @@ func main() {
 	totalAdvance := cursorX
 
 	// SVG dimensions.
-	ascent := int32(info.Ascent)
-	descent := int32(info.Descent) // negative
+	asc, desc, _, _ := font.VMetrics()
+	ascent, descent := int32(asc), int32(desc) // descent is negative
 	height := ascent - descent
 	padding := int32(float64(height) * 0.15)
 

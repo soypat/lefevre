@@ -51,8 +51,8 @@ func TestScanlineRasterizer_EmptyOutline(t *testing.T) {
 
 func TestScanlineRasterizer_GlyphA(t *testing.T) {
 	f := loadTestFont(t)
-	info := f.Info()
-	scale := float32(32) / float32(info.UnitsPerEm)
+	upem := f.UnitsPerEm()
+	scale := float32(32) / float32(upem)
 	gid := f.GlyphID('A')
 	w, h, _, _ := GlyphBox(f, gid, scale)
 	if w == 0 || h == 0 {

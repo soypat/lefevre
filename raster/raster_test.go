@@ -24,8 +24,8 @@ func loadTestFont(t *testing.T) *lefevre.Font {
 
 func TestGlyphBox_LatinA(t *testing.T) {
 	f := loadTestFont(t)
-	info := f.Info()
-	scale := float32(32) / float32(info.UnitsPerEm)
+	upem := f.UnitsPerEm()
+	scale := float32(32) / float32(upem)
 	gid := f.GlyphID('A')
 	w, h, xoff, yoff := GlyphBox(f, gid, scale)
 	if w <= 0 || h <= 0 {
@@ -43,8 +43,8 @@ func TestGlyphBox_LatinA(t *testing.T) {
 
 func TestGlyphBox_Space(t *testing.T) {
 	f := loadTestFont(t)
-	info := f.Info()
-	scale := float32(32) / float32(info.UnitsPerEm)
+	upem := f.UnitsPerEm()
+	scale := float32(32) / float32(upem)
 	gid := f.GlyphID(' ')
 	w, h, _, _ := GlyphBox(f, gid, scale)
 	if w != 0 || h != 0 {
@@ -54,10 +54,10 @@ func TestGlyphBox_Space(t *testing.T) {
 
 func TestGlyphBox_ScaleProportional(t *testing.T) {
 	f := loadTestFont(t)
-	info := f.Info()
+	upem := f.UnitsPerEm()
 	gid := f.GlyphID('A')
-	scale1 := float32(16) / float32(info.UnitsPerEm)
-	scale2 := float32(32) / float32(info.UnitsPerEm)
+	scale1 := float32(16) / float32(upem)
+	scale2 := float32(32) / float32(upem)
 	w1, h1, _, _ := GlyphBox(f, gid, scale1)
 	w2, h2, _, _ := GlyphBox(f, gid, scale2)
 	// At double scale, dimensions should be roughly double (within rounding).
