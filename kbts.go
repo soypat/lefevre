@@ -316,12 +316,21 @@ type FontInfo struct {
 	StyleFlags           FontStyleFlags
 	Weight               FontWeight
 	Width                FontWidth
+	// WeightClass and WidthClass are the OS/2 numbers Weight and Width bucket:
+	// usWeightClass in 100..1000 and usWidthClass in 1..9. A PDF font descriptor
+	// and a family matcher both want the number, since the bucket cannot tell a
+	// semibold from a bold and those are different faces.
+	WeightClass uint16
+	WidthClass  uint16
 	// Font metrics (from head, hhea, OS/2 tables).
 	UnitsPerEm             uint16
 	XMin, YMin, XMax, YMax int16
 	Ascent, Descent        int16
 	LineGap                int16
 	CapHeight              int16
+	// XHeight is OS/2 sxHeight, zero for a font whose OS/2 table is too short
+	// to carry one (version 1 and earlier), as CapHeight is.
+	XHeight int16
 	// italic angle in degrees counter-clockwise from vertical
 	ItalicAngle        float64
 	UnderlinePosition  int16
@@ -336,6 +345,7 @@ type Font struct {
 	dir        []tableRecord          // every table the file carries, in directory order
 	cmapFormat uint16                 // selected cmap subtable format (4 or 12)
 	cmapOffset uint32                 // absolute offset of selected cmap subtable in data
+	info       FontInfo               // metadata, parsed once at load
 	err        error                  // sticky parse error
 }
 
@@ -356,10 +366,64 @@ func (f *Font) IsValid() bool {
 	return f != nil && f.err == nil && f.data != nil
 }
 
-// Info returns metadata about the font.
+// Err returns the font's sticky parse error, nil if it parsed cleanly. Every
+// accessor answers zero for a font it cannot read, so this is what separates
+// "this font has no such glyph" from "this font is damaged".
+func (f *Font) Err() error {
+	if f == nil {
+		return nil
+	}
+	return f.err
+}
+
+// Info returns metadata about the font, parsed once when the font was loaded.
 // Returns zero FontInfo if the font is invalid.
 func (f *Font) Info() FontInfo {
-	return f.fontInfo()
+	if f == nil {
+		return FontInfo{}
+	}
+	return f.info
+}
+
+// UnitsPerEm is the design grid every metric this font reports is expressed in.
+// A point size scales them: advance * size / UnitsPerEm.
+func (f *Font) UnitsPerEm() int {
+	return int(f.Info().UnitsPerEm)
+}
+
+// PostScriptName is the font's PostScript name, such as "Helvetica-Bold". It is
+// empty for a font whose name table carries no name ID 6.
+func (f *Font) PostScriptName() string {
+	return f.Info().PostScriptName
+}
+
+// Family reports the typographic family and subfamily, such as "Lato" and
+// "Semibold Italic", falling back to the basic name-table pair.
+func (f *Font) Family() (family, subfamily string) {
+	info := f.Info()
+	return info.TypographicFamily, info.TypographicSubfamily
+}
+
+// Bounds is the box holding every glyph in the font, in font units.
+func (f *Font) Bounds() (xMin, yMin, xMax, yMax int16) {
+	info := f.Info()
+	return info.XMin, info.YMin, info.XMax, info.YMax
+}
+
+// VMetrics reports the vertical metrics in font units. descent is negative,
+// below the baseline, and capHeight is zero for a font that declares none.
+func (f *Font) VMetrics() (ascent, descent, lineGap, capHeight int16) {
+	info := f.Info()
+	return info.Ascent, info.Descent, info.LineGap, info.CapHeight
+}
+
+// Style reports what a consumer needs to pick this face out of a family or
+// synthesize a stand-in for it: the raw usWeightClass (100..1000), the italic
+// angle in degrees counter-clockwise from vertical, and whether every glyph
+// advances the same.
+func (f *Font) Style() (weight int, italicAngle float64, fixedPitch bool) {
+	info := f.Info()
+	return int(info.WeightClass), info.ItalicAngle, info.IsFixedPitch
 }
 
 // GlyphID returns the glyph index for a codepoint via the font's cmap table.

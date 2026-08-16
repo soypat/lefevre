@@ -174,7 +174,13 @@ func fontFromMemory(data []byte, fontIndex int) (*Font, error) {
 		tblOffset := readU32BE(data, recOff+8)
 		tblLength := readU32BE(data, recOff+12)
 		if uint64(tblOffset)+uint64(tblLength) > uint64(len(data)) {
-			continue // skip tables that extend beyond file
+			// Skip tables that extend beyond file. A record pointing past the
+			// end is damage, not an absent table, and the difference is what
+			// Err exists to report: every accessor answers zero either way.
+			if f.err == nil {
+				f.err = fmt.Errorf("kbts: table %q extends past end of font data", tagName(tag))
+			}
+			continue
 		}
 		if int(tblOffset) < recordsStart+numTables*16 {
 			// A table's bytes come after the records describing them, so a
@@ -191,7 +197,15 @@ func fontFromMemory(data []byte, fontIndex int) (*Font, error) {
 	// Select cmap subtable.
 	f.selectCmap()
 
+	// Metadata is parsed once, here, rather than on every Info call
+	f.info = f.fontInfo()
+
 	return f, nil
+}
+
+// tagName renders a table tag as its four characters, for error messages.
+func tagName(tag uint32) string {
+	return string([]byte{byte(tag >> 24), byte(tag >> 16), byte(tag >> 8), byte(tag)})
 }
 
 // selectCmap finds the best cmap subtable and stores it on the Font.
@@ -394,26 +408,26 @@ func (f *Font) readNameTable(info *FontInfo) {
 		strLen := int(readU16BE(f.data, rOff+8))
 		strOff := stringStorageOff + int(readU16BE(f.data, rOff+10))
 
-		if languageID != 0 {
+		// English only: Macintosh English is language 0, Windows US English is
+		// 0x409, and a font may carry either alone
+		if languageID != 0 && languageID != 0x409 {
 			continue
 		}
 		if strOff+strLen > len(f.data) {
 			continue
 		}
 
-		raw := f.data[strOff : strOff+strLen]
-		var s string
-		if platformID == 3 || (platformID == 0 && encodingID > 0) {
-			// UTF-16BE
-			s = decodeUTF16BE(raw)
-		} else {
-			// Latin-1 / ASCII
-			s = string(raw)
-		}
-
+		// Decide before decoding: a name table carries records this package has
+		// no field for, the licence among them, and those are the long ones.
 		dst := nameIDToField(info, nameID)
-		if dst != nil && *dst == "" {
-			*dst = s
+		if dst == nil || *dst != "" {
+			continue
+		}
+		raw := f.data[strOff : strOff+strLen]
+		if platformID == 3 || (platformID == 0 && encodingID > 0) {
+			*dst = decodeUTF16BE(raw) // UTF-16BE
+		} else {
+			*dst = string(raw) // Latin-1 / ASCII
 		}
 	}
 
@@ -488,11 +502,11 @@ func (f *Font) readOS2Table(info *FontInfo) {
 		return
 	}
 
-	weightClass := readU16BE(f.data, base+4)
-	info.Weight = weightClassToFontWeight(weightClass)
+	info.WeightClass = readU16BE(f.data, base+4)
+	info.Weight = weightClassToFontWeight(info.WeightClass)
 
-	widthClass := readU16BE(f.data, base+6)
-	info.Width = widthClassToFontWidth(widthClass)
+	info.WidthClass = readU16BE(f.data, base+6)
+	info.Width = widthClassToFontWidth(info.WidthClass)
 
 	if te.length >= 64 {
 		selection := readU16BE(f.data, base+62)
@@ -513,6 +527,11 @@ func (f *Font) readOS2Table(info *FontInfo) {
 		info.LineGap = readS16BE(f.data, base+72)
 	}
 
+	// sxHeight and sCapHeight arrive with OS/2 version 2; an older table simply
+	// stops before them.
+	if te.length >= 88 {
+		info.XHeight = readS16BE(f.data, base+86)
+	}
 	if te.length >= 90 {
 		info.CapHeight = readS16BE(f.data, base+88)
 	}
@@ -864,9 +883,9 @@ func assignJoiningForms(glyphs []Glyph) {
 	// canJoinRight is a bitmask: for a given previous joining type (byte index),
 	// bit positions indicate which current joining types can join.
 	// Left, Dual, and Force types can join to the right of Right, Dual, and Force types.
-	const canJoinRight = (1<<joiningTypeRight | 1<<joiningTypeDual | 1<<joiningTypeForce) << (8 * joiningTypeLeft) |
-		(1<<joiningTypeRight | 1<<joiningTypeDual | 1<<joiningTypeForce) << (8 * joiningTypeDual) |
-		(1<<joiningTypeRight | 1<<joiningTypeDual | 1<<joiningTypeForce) << (8 * joiningTypeForce)
+	const canJoinRight = (1<<joiningTypeRight|1<<joiningTypeDual|1<<joiningTypeForce)<<(8*joiningTypeLeft) |
+		(1<<joiningTypeRight|1<<joiningTypeDual|1<<joiningTypeForce)<<(8*joiningTypeDual) |
+		(1<<joiningTypeRight|1<<joiningTypeDual|1<<joiningTypeForce)<<(8*joiningTypeForce)
 
 	// transition maps a glyph's current joining feature to its new form when
 	// a following glyph joins to it: isol→init, fina→medi.
