@@ -200,18 +200,8 @@ const (
 	joiningTypeTransparent joiningType = 5 // Transparent (marks)
 )
 
-func getJoiningType(cp rune) joiningType {
-	u := uint32(cp)
-	if u >= 1114110 {
-		return 0
-	}
-	var page uint32
-	if u < 918016 {
-		page = uint32(joiningTypePageIndices[u/128]) * 128
-	} else {
-		page = 0
-	}
-	return joiningType(joiningTypeData[page|(u&127)])
+func (u *UnicodeTables) joiningType(cp rune) joiningType {
+	return joiningType(u.joining.at(uint32(cp)))
 }
 
 // unicodeFlag bits from kbts_unicode_flags.
@@ -226,104 +216,109 @@ const (
 	unicodeFlagMirrored              uint8 = unicodeFlagOpenBracket | unicodeFlagCloseBracket
 )
 
-// Lookup functions using two-level tables.
-
-func getGraphemeBreakClass(cp rune) graphemeBreakClass {
-	u := uint32(cp)
-	if u >= 1114110 {
-		return 0
-	}
-	var page uint32
-	if u < 921600 {
-		page = uint32(graphemeBreakClassPageIndices[u/128]) * 128
-	} else {
-		page = 256
-	}
-	return graphemeBreakClass(graphemeBreakClassData[page|(u&127)])
+// pageTable is a two-level page table over the Unicode codespace: pages maps
+// a codepoint's high bits to a page of 1<<shift entries in data.
+//
+// The zero value answers zero for every codepoint, because maxCP of 0 makes the
+// first comparison reject everything. A table a set leaves out therefore needs
+// no nil check at its call site and costs no branch of its own.
+type pageTable[T uint8 | uint16 | uint32] struct {
+	pages    []uint8
+	data     []T
+	maxCP    uint32 // exclusive; at or above this the table answers zero
+	highPage uint32 // data offset for codepoints past the page-index array
+	shift    uint8  // 7 for 128-entry pages, 5 for mirroring
 }
 
-func getLineBreakClass(cp rune) lineBreakClass {
-	u := uint32(cp)
-	if u >= 1114110 {
-		return 0
+func (t *pageTable[T]) at(u uint32) T {
+	if u >= t.maxCP {
+		var zero T
+		return zero
 	}
-	var page uint32
-	if u < 918016 {
-		page = uint32(lineBreakClassPageIndices[u/128]) * 128
-	} else {
-		page = 256
+	page := t.highPage
+	if p := u >> t.shift; p < uint32(len(t.pages)) {
+		page = uint32(t.pages[p]) << t.shift
 	}
-	return lineBreakClass(lineBreakClassData[page|(u&127)])
+	return t.data[page|(u&(uint32(1)<<t.shift-1))]
 }
 
-func getWordBreakClass(cp rune) wordBreakClass {
-	u := uint32(cp)
-	if u >= 1114110 {
-		return 0
-	}
-	var page uint32
-	if u < 918016 {
-		page = uint32(wordBreakClassPageIndices[u/128]) * 128
-	} else {
-		page = 7296
-	}
-	return wordBreakClass(wordBreakClassData[page|(u&127)])
+// UnicodeTables is the character-property data the segmenter and shaper read.
+// Restricting it to the codepoints a program actually renders is the difference
+// between roughly 273 KB of tables and roughly 1.4 KB, which is what decides
+// whether shaping fits on a microcontroller.
+//
+// Obtain one from [UnicodeFull] or [UnicodeASCII]. Those are functions, and
+// must stay functions: a package-level variable holding a UnicodeTables forces
+// a package init that references every table, and the linker then retains all
+// of them even for a program that only ever asks for the smallest set. Adding
+// one such variable anywhere in this package silently costs every user 273 KB.
+//
+// The zero value covers nothing and answers zero for every property.
+type UnicodeTables struct {
+	// MaxRune is the highest codepoint this set describes, inclusive.
+	MaxRune rune
+
+	grapheme pageTable[uint8]
+	line     pageTable[uint8]
+	word     pageTable[uint8]
+	bidi     pageTable[uint8]
+	flags    pageTable[uint8]
+	joining  pageTable[uint8]
+	script   pageTable[uint16]
+	mirror   pageTable[uint32]
+
+	// scriptExt holds the multi-script extension lists script indexes into.
+	// A set whose range reaches no codepoint with more than one script leaves
+	// it nil, since nothing can index it.
+	scriptExt []uint8
 }
 
-func getBidiClass(cp rune) bidiClass {
-	u := uint32(cp)
-	if u >= 1114110 {
-		return 0
-	}
-	var page uint32
-	if u < 1048704 {
-		page = uint32(bidiClassPageIndices[u/128]) * 128
-	} else {
-		page = 7296
-	}
-	return bidiClass(bidiClassData[page|(u&127)])
+// Covered reports whether cp is within the range this set describes. Runes
+// outside it read as zero for every property rather than as their true value,
+// so a caller shaping arbitrary text must substitute before looking them up.
+func (u *UnicodeTables) Covered(cp rune) bool {
+	return uint32(cp) <= uint32(u.MaxRune)
 }
 
-func getUnicodeFlags(cp rune) uint8 {
-	u := uint32(cp)
-	if u >= 1114110 {
-		return 0
-	}
-	var page uint32
-	if u < 1048704 {
-		page = uint32(unicodeFlagsPageIndices[u/128]) * 128
-	} else {
-		page = 256
-	}
-	return unicodeFlagsData[page|(u&127)]
+// Lookup methods using two-level tables.
+
+func (u *UnicodeTables) graphemeBreakClass(cp rune) graphemeBreakClass {
+	return graphemeBreakClass(u.grapheme.at(uint32(cp)))
 }
 
-func getScriptExtension(cp rune) uint16 {
-	u := uint32(cp)
-	if u >= 1114110 {
-		return 0
-	}
-	var page uint32
-	if u < 918016 {
-		page = uint32(scriptExtensionPageIndices[u/128]) * 128
-	} else {
-		page = 7808
-	}
-	return scriptExtensionData[page|(u&127)]
+func (u *UnicodeTables) lineBreakClass(cp rune) lineBreakClass {
+	return lineBreakClass(u.line.at(uint32(cp)))
 }
 
-func getMirrorCodepoint(cp rune) uint32 {
-	u := uint32(cp)
-	if u >= 1114110 {
-		return 0
+func (u *UnicodeTables) wordBreakClass(cp rune) wordBreakClass {
+	return wordBreakClass(u.word.at(uint32(cp)))
+}
+
+func (u *UnicodeTables) bidiClass(cp rune) bidiClass {
+	return bidiClass(u.bidi.at(uint32(cp)))
+}
+
+func (u *UnicodeTables) unicodeFlags(cp rune) uint8 {
+	return u.flags.at(uint32(cp))
+}
+
+func (u *UnicodeTables) scriptExtension(cp rune) uint16 {
+	return u.script.at(uint32(cp))
+}
+
+func (u *UnicodeTables) mirrorCodepoint(cp rune) uint32 {
+	return u.mirror.at(uint32(cp))
+}
+
+// scriptExtensionList returns the count scripts starting at off, or nil if the
+// list cannot supply them. A table set restricted to a range with no
+// multi-script codepoint carries no list at all, so the nil case is normal
+// rather than a sign of damage.
+func scriptExtensionList(ext []uint8, off, count uint32) []uint8 {
+	if off > uint32(len(ext)) || count > uint32(len(ext))-off {
+		return nil
 	}
-	var page uint32
-	if u < 65408 {
-		page = uint32(mirrorCodepointPageIndices[u/32]) * 32
-	} else {
-		page = 0
-	}
-	return mirrorCodepointData[page|(u&31)]
+	return ext[off:]
 }
 
 func scriptExtensionCount(ext uint16) int {

@@ -5,6 +5,13 @@ type ShapeConfig struct {
 	Font     *Font             // Font to shape with (required)
 	Size     int32             // Font size in font units; 0 means use UnitsPerEm from font
 	Features []FeatureOverride // OpenType feature overrides (e.g., disable ligatures)
+
+	// Unicode is read only to assign Arabic joining forms. A zero set leaves
+	// every glyph isolated, which is correct for a build that carries no
+	// Arabic data and harmless for text that has no Arabic in it.
+	// [ShapeConfig.ShapeSimple] supplies the full set when this is zero,
+	// because its segmentation needs one anyway.
+	Unicode UnicodeTables
 }
 
 // Shape shapes text into positioned glyph runs, appending results to dst.
@@ -128,7 +135,7 @@ func (cfg *ShapeConfig) Shape(dst []Run, text string, breaks []Break) []Run {
 	emitRun := func(glyphs []Glyph, props runProps) Run {
 		// Apply GSUB features: use Arabic shaper for Arabic-family scripts.
 		if props.script.Shaper() == ShaperArabic {
-			glyphs = f.applyArabicShaping(glyphs, disabledFeatures)
+			glyphs = f.applyArabicShaping(&cfg.Unicode, glyphs, disabledFeatures)
 		} else {
 			glyphs = f.applyGSUBFeatures(glyphs, defaultGSUBFeatures[:], disabledFeatures)
 		}
@@ -188,14 +195,20 @@ func (cfg *ShapeConfig) Shape(dst []Run, text string, breaks []Break) []Run {
 	return dst
 }
 
-// ShapeSimple segments and shapes text in one call.
-// Equivalent to running a Breaker then calling Shape.
+// ShapeSimple segments and shapes text in one call against the full Unicode
+// tables, filling [ShapeConfig.Unicode] if it was left zero.
+//
+// Equivalent to running a [Breaker] then calling Shape. Programs that never
+// call it pay nothing for the tables it names, since it is eliminated along
+// with them; shape against a smaller set by driving a Breaker yourself.
 func (cfg *ShapeConfig) ShapeSimple(dst []Run, text string, dir Direction) []Run {
 	if cfg.Font == nil || !cfg.Font.IsValid() || len(text) == 0 {
 		return dst
 	}
-	var b Breaker
-	b.Direction = dir
+	if cfg.Unicode.MaxRune == 0 {
+		cfg.Unicode = UnicodeFull()
+	}
+	b := Breaker{Direction: dir, Unicode: cfg.Unicode}
 	breaks, _ := b.AppendBreak(nil, []byte(text))
 	breaks = b.End(breaks)
 	return cfg.Shape(dst, text, breaks)

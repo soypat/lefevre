@@ -24,8 +24,7 @@ func main() {
 	// Breaker segments text into all break types at once.
 	fmt.Println("\n=== Breaker ===")
 	text := "Hello world!\nمرحبا"
-	var b kb.Breaker
-	b.Direction = kb.DirectionLTR
+	b := kb.NewBreaker(kb.DirectionLTR)
 	breaks, _ := b.AppendBreak(nil, []byte(text))
 	breaks = b.End(breaks)
 	fmt.Printf("  Text: %q\n", text)

@@ -67,6 +67,12 @@ type breakBuf struct {
 type breakStateInternal struct {
 	breakBuf
 
+	// u is held by value so that Begin, which clears the whole state, can
+	// restore it without allocating. The zero set answers zero for every
+	// property, so a state that was never begun segments nothing rather than
+	// faulting.
+	u UnicodeTables
+
 	paragraphDirection     Direction
 	userParagraphDirection Direction
 
@@ -116,10 +122,25 @@ type breakStateInternal struct {
 	lastLineBreakClass     lineBreakClass
 }
 
-// Begin initializes or resets the break state for a new text run.
+// Begin initializes or resets the break state for a new text run, segmenting
+// against the full Unicode tables.
+//
+// Reaching [UnicodeFull] from here costs nothing to a program that does not use
+// Begin: this function is itself eliminated when unreferenced, and the tables
+// go with it. Call [BreakState.BeginUnicode] to segment against a smaller set.
 func (bs *BreakState) Begin(paragraphDirection Direction, style JapaneseLineBreakStyle, flags BreakConfigFlags) {
+	u := UnicodeFull()
+	bs.BeginUnicode(&u, paragraphDirection, style, flags)
+}
+
+// BeginUnicode initializes or resets the break state for a new text run,
+// segmenting against u. Codepoints outside u's range read as zero for every
+// property, so a caller feeding arbitrary text should substitute them first;
+// see [UnicodeTables.Covered].
+func (bs *BreakState) BeginUnicode(u *UnicodeTables, paragraphDirection Direction, style JapaneseLineBreakStyle, flags BreakConfigFlags) {
 	*bs = BreakState{}
 	s := &bs.s
+	s.u = *u
 	s.userParagraphDirection = paragraphDirection
 	s.paragraphDirection = paragraphDirection
 	s.japaneseLineBreakStyle = style
@@ -327,13 +348,16 @@ func wordBreakBits(priority, position uint32) uint32 {
 func breakAddCodepoint(s *breakStateInternal, codepoint uint32, positionIncrement uint32, maybeEndOfText bool) {
 	cp := rune(codepoint)
 
-	bidirectionalCls := getBidiClass(cp)
-	unicodeFlgs := getUnicodeFlags(cp)
-	matchingBracket := getMirrorCodepoint(cp)
-	graphemeBrkClass := getGraphemeBreakClass(cp)
-	lineBrkClass := getLineBreakClass(cp)
-	wordBrkClass := getWordBreakClass(cp)
-	scriptExt := getScriptExtension(cp)
+	// Hoisted so the property reads cost one load between them rather than one
+	// each, this being the hottest loop in the package.
+	u := &s.u
+	bidirectionalCls := u.bidiClass(cp)
+	unicodeFlgs := u.unicodeFlags(cp)
+	matchingBracket := u.mirrorCodepoint(cp)
+	graphemeBrkClass := u.graphemeBreakClass(cp)
+	lineBrkClass := u.lineBreakClass(cp)
+	wordBrkClass := u.wordBreakClass(cp)
+	scriptExt := u.scriptExtension(cp)
 	cpScriptCount := uint32(scriptExtensionCount(scriptExt))
 	cpScriptOffset := uint32(scriptExtensionOffset(scriptExt))
 
@@ -435,9 +459,11 @@ func breakAddCodepoint(s *breakStateInternal, codepoint uint32, positionIncremen
 			scriptCnt = 1
 			scriptSet[0] = cpScript
 		}
-	} else {
-		// Refine script set by intersecting.
-		cpScripts := scriptExtensions[cpScriptOffset:]
+	} else if cpScripts := scriptExtensionList(s.u.scriptExt, cpScriptOffset, cpScriptCount); cpScripts != nil {
+		// Refine script set by intersecting. A table set whose range reaches no
+		// multi-script codepoint carries no extension list and cannot land
+		// here; if one somehow does, the set is left as it was rather than the
+		// list being read past its end.
 		newCount := uint32(0)
 		si := uint32(0)
 		ci := uint32(0)

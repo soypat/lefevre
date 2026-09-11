@@ -1,6 +1,9 @@
 package lefevre
 
-import "unicode/utf8"
+import (
+	"errors"
+	"unicode/utf8"
+)
 
 // fourcc creates a four-character code from four bytes, matching the KBTS_FOURCC macro.
 func fourcc(a, b, c, d byte) uint32 {
@@ -528,22 +531,56 @@ const (
 
 // Breaker is a high-level streaming text segmenter.
 // Feed text via AppendBreak, then call End to flush remaining breaks.
-// The zero value is ready to use with default settings.
+//
+// Unicode must be set before the first AppendBreak; [NewBreaker] does it.
+// The zero value does not segment, because there is no table set it could
+// default to: reaching [UnicodeFull] from AppendBreak would make every build
+// carry all ~273 KB of tables, including one that asked only for [UnicodeASCII].
+// A Breaker with no tables consumes its input, emits no breaks, and reports
+// [ErrNoUnicodeTables] from Err.
 type Breaker struct {
 	Direction Direction
 	JStyle    JapaneseLineBreakStyle
 	Flags     BreakConfigFlags
-	state     BreakState
-	begun     bool
+
+	// Unicode is the table set segmentation reads. Codepoints outside its
+	// range read as zero for every property.
+	Unicode UnicodeTables
+
+	state BreakState
+	begun bool
+	err   error
 }
+
+// ErrNoUnicodeTables reports a [Breaker] used without a table set.
+var ErrNoUnicodeTables = errors.New("lefevre: Breaker has no Unicode tables; set Unicode or use NewBreaker")
+
+// NewBreaker returns a Breaker segmenting against the full Unicode tables.
+//
+// Programs that do not use it pay nothing for the tables it names: this
+// function is eliminated when unreferenced, and they go with it. Build the
+// Breaker directly with a smaller [UnicodeTables] to keep them out.
+func NewBreaker(dir Direction) Breaker {
+	return Breaker{Direction: dir, Unicode: UnicodeFull()}
+}
+
+// Err reports whether the Breaker is usable. It returns [ErrNoUnicodeTables]
+// if segmentation was attempted with no table set.
+func (b *Breaker) Err() error { return b.err }
 
 // AppendBreak processes all complete runes in text, appending breaks to dst.
 // Returns the extended slice and the number of bytes consumed.
 // Incomplete trailing UTF-8 sequences are not consumed.
 // Never sets end-of-text; call End after the last chunk.
 func (b *Breaker) AppendBreak(dst []Break, text []byte) ([]Break, int) {
+	if b.Unicode.MaxRune == 0 {
+		// Report all of text consumed even though none of it was segmented, so
+		// that a caller draining a stream terminates instead of spinning.
+		b.err = ErrNoUnicodeTables
+		return dst, len(text)
+	}
 	if !b.begun {
-		b.state.Begin(b.Direction, b.JStyle, b.Flags)
+		b.state.BeginUnicode(&b.Unicode, b.Direction, b.JStyle, b.Flags)
 		b.begun = true
 	}
 	var bytesConsumed int

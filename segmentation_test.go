@@ -6,8 +6,7 @@ import (
 
 func appendBreaks(t *testing.T, text string, dir Direction, flags BreakConfigFlags) []Break {
 	t.Helper()
-	var b Breaker
-	b.Direction = dir
+	b := NewBreaker(dir)
 	b.Flags = flags
 	breaks, _ := b.AppendBreak(nil, []byte(text))
 	breaks = b.End(breaks)
@@ -187,8 +186,7 @@ func TestBreakerChunked(t *testing.T) {
 	singleBreaks := appendBreaks(t, text, DirectionLTR, BreakConfigNone)
 
 	// Chunked result — feed 2 bytes at a time.
-	var b Breaker
-	b.Direction = DirectionLTR
+	b := NewBreaker(DirectionLTR)
 	var chunkedBreaks []Break
 	remaining := text
 	for len(remaining) > 0 {

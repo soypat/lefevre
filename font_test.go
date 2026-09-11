@@ -1351,12 +1351,21 @@ func TestJoiningTypeLookup(t *testing.T) {
 		{'\u0640', joiningTypeForce},  // Tatweel (join-causing)
 		{'\u064B', joiningTypeTransparent}, // Fathatan (transparent mark)
 	}
+	u := UnicodeFull()
 	for _, tc := range tests {
-		got := getJoiningType(tc.r)
+		got := u.joiningType(tc.r)
 		if got != tc.want {
-			t.Errorf("getJoiningType(U+%04X) = %d, want %d", tc.r, got, tc.want)
+			t.Errorf("joiningType(U+%04X) = %d, want %d", tc.r, got, tc.want)
 		}
 	}
+}
+
+// assignJoiningFormsFull assigns joining forms against the full Unicode tables,
+// which is what these tests exercise; a set without Arabic leaves every glyph
+// isolated by design.
+func assignJoiningFormsFull(glyphs []Glyph) {
+	u := UnicodeFull()
+	assignJoiningForms(&u, glyphs)
 }
 
 func TestAssignJoiningForms(t *testing.T) {
@@ -1366,7 +1375,7 @@ func TestAssignJoiningForms(t *testing.T) {
 		{Codepoint: '\u062D'}, // Haa
 		{Codepoint: '\u0631'}, // Ra (right-joining)
 	}
-	assignJoiningForms(glyphs)
+	assignJoiningFormsFull(glyphs)
 
 	// Ba should be initial (has a following dual-joiner).
 	if glyphs[0].joiningFeature != joiningFeatureInit {
@@ -1396,7 +1405,7 @@ func TestAssignJoiningForms(t *testing.T) {
 func TestAssignJoiningFormsIsolated(t *testing.T) {
 	// Single character should be isolated.
 	glyphs := []Glyph{{Codepoint: '\u0628'}} // Ba alone
-	assignJoiningForms(glyphs)
+	assignJoiningFormsFull(glyphs)
 
 	if glyphs[0].joiningFeature != joiningFeatureIsol {
 		t.Errorf("glyph[0] (Ba) joiningFeature = %d, want isol (%d)", glyphs[0].joiningFeature, joiningFeatureIsol)
@@ -1413,7 +1422,7 @@ func TestAssignJoiningFormsWithSpace(t *testing.T) {
 		{Codepoint: ' '},      // Space (non-joining)
 		{Codepoint: '\u0628'}, // Ba
 	}
-	assignJoiningForms(glyphs)
+	assignJoiningFormsFull(glyphs)
 
 	if glyphs[0].joiningFeature != joiningFeatureIsol {
 		t.Errorf("glyph[0] (Ba) joiningFeature = %d, want isol (%d)", glyphs[0].joiningFeature, joiningFeatureIsol)
@@ -1430,7 +1439,7 @@ func TestAssignJoiningFormsTransparent(t *testing.T) {
 		{Codepoint: '\u064E'}, // Fatha (transparent mark)
 		{Codepoint: '\u0628'}, // Ba (dual)
 	}
-	assignJoiningForms(glyphs)
+	assignJoiningFormsFull(glyphs)
 
 	// Ba should be init (transparent mark doesn't break the join).
 	if glyphs[0].joiningFeature != joiningFeatureInit {
@@ -1452,7 +1461,7 @@ func TestAssignJoiningFormsRightJoining(t *testing.T) {
 		{Codepoint: '\u062F'}, // Dal (right-joining)
 		{Codepoint: '\u0628'}, // Ba (dual-joining)
 	}
-	assignJoiningForms(glyphs)
+	assignJoiningFormsFull(glyphs)
 
 	// Dal: right-joining, nothing before → isolated.
 	if glyphs[0].joiningFeature != joiningFeatureIsol {
@@ -1472,7 +1481,7 @@ func TestAssignJoiningFormsBaDal(t *testing.T) {
 		{Codepoint: '\u0628'}, // Ba (dual-joining)
 		{Codepoint: '\u062F'}, // Dal (right-joining)
 	}
-	assignJoiningForms(glyphs)
+	assignJoiningFormsFull(glyphs)
 
 	if glyphs[0].joiningFeature != joiningFeatureInit {
 		t.Errorf("glyph[0] (Ba) joiningFeature = %d, want init (%d)", glyphs[0].joiningFeature, joiningFeatureInit)

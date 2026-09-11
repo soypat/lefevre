@@ -901,7 +901,7 @@ const joiningFeatureMask = GlyphFlagIsol | GlyphFlagFina | GlyphFlagFin2 | Glyph
 //   - Skip transparent glyphs (marks)
 //   - For each non-transparent glyph, check if it can join with the previous non-transparent glyph
 //   - Use a transition table to update the previous glyph's form when a join occurs
-func assignJoiningForms(glyphs []Glyph) {
+func assignJoiningForms(u *UnicodeTables, glyphs []Glyph) {
 	// canJoinRight is a bitmask: for a given previous joining type (byte index),
 	// bit positions indicate which current joining types can join.
 	// Left, Dual, and Force types can join to the right of Right, Dual, and Force types.
@@ -920,7 +920,7 @@ func assignJoiningForms(glyphs []Glyph) {
 	var prevJT joiningType
 
 	for i := range glyphs {
-		jt := getJoiningType(glyphs[i].Codepoint)
+		jt := u.joiningType(glyphs[i].Codepoint)
 		if jt == joiningTypeTransparent {
 			continue
 		}
@@ -952,8 +952,10 @@ func assignJoiningForms(glyphs []Glyph) {
 // 2. Apply ccmp/locl GSUB features
 // 3. Apply joining GSUB features (isol/fina/medi/init) filtered by each glyph's joining form flag
 // 4. Apply post-joining GSUB features (rlig/rclt/calt/liga)
-func (f *Font) applyArabicShaping(glyphs []Glyph, disabledFeatures map[FeatureTag]bool) []Glyph {
-	assignJoiningForms(glyphs)
+// A table set that carries no joining data leaves every glyph in isolated form,
+// which is what a set restricted to a range without Arabic should do.
+func (f *Font) applyArabicShaping(u *UnicodeTables, glyphs []Glyph, disabledFeatures map[FeatureTag]bool) []Glyph {
+	assignJoiningForms(u, glyphs)
 
 	// Phase 1: ccmp/locl.
 	glyphs = f.applyGSUBFeatures(glyphs, arabicGSUBFeatures[:], disabledFeatures)
