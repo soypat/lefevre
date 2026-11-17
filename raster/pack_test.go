@@ -182,3 +182,64 @@ func TestPack_AppendsToExisting(t *testing.T) {
 		t.Error("Pack overwrote existing placement instead of appending")
 	}
 }
+
+// bottomRowMax returns the highest coverage in the bottom row of p's atlas cell.
+func bottomRowMax(atlas []byte, atlasW int, p PackedGlyph) byte {
+	var m byte
+	for _, a := range atlas[(p.Y+p.H-1)*atlasW+p.X:][:p.W] {
+		m = max(m, a)
+	}
+	return m
+}
+
+func TestBakeAtlas_Baseline(t *testing.T) {
+	// Glyphs resting on the baseline end exactly at the bottom of their bitmap, whatever the
+	// fractional part of their height: drawn at the pen plus Yoff, they share one baseline.
+	f := loadTestFont(t)
+	cfg := PackConfig{Font: f, Scale: float32(32) / float32(f.UnitsPerEm()), Padding: 1}
+	const flat = "HIx"
+	glyphs := make([]uint16, len(flat))
+	for i, r := range flat {
+		glyphs[i] = f.GlyphID(r)
+		if _, yMin, _, _ := f.GlyphBounds(glyphs[i]); yMin != 0 {
+			t.Fatalf("%q does not rest on the baseline: yMin=%d", r, yMin)
+		}
+	}
+	placements := make([]PackedGlyph, len(glyphs))
+	atlas := make([]byte, 128*128)
+	var rast ScanlineRasterizer
+	if err := cfg.BakeAtlas(&rast, glyphs, atlas, 128, 128, placements); err != nil {
+		t.Fatal(err)
+	}
+	for i, p := range placements {
+		if p.Yoff+p.H != 0 {
+			t.Errorf("%q: bitmap bottom %d pixels from the baseline", flat[i], p.Yoff+p.H)
+		}
+		if m := bottomRowMax(atlas, 128, p); m < 250 {
+			t.Errorf("%q: bottom row coverage %d, want full coverage at the baseline", flat[i], m)
+		}
+	}
+}
+
+func TestBakeAtlas_BottomEdge(t *testing.T) {
+	// Glyphs placed against the atlas's bottom edge are drawn, wherever they are in the row.
+	f := loadTestFont(t)
+	cfg := PackConfig{Font: f, Scale: float32(32) / float32(f.UnitsPerEm())}
+	glyphs := []uint16{f.GlyphID('H'), f.GlyphID('I')}
+	_, h, _, _ := GlyphBox(f, glyphs[0], cfg.Scale)
+	const atlasW = 64
+	atlas := make([]byte, atlasW*h)
+	placements := make([]PackedGlyph, len(glyphs))
+	var rast ScanlineRasterizer
+	if err := cfg.BakeAtlas(&rast, glyphs, atlas, atlasW, h, placements); err != nil {
+		t.Fatal(err)
+	}
+	for i, p := range placements {
+		if p.Y+p.H != h {
+			t.Fatalf("glyph %d does not touch the atlas bottom: Y=%d H=%d", i, p.Y, p.H)
+		}
+		if bottomRowMax(atlas, atlasW, p) == 0 {
+			t.Errorf("glyph %d at X=%d has no ink in its bottom row", i, p.X)
+		}
+	}
+}

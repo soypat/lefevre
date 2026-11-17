@@ -101,3 +101,39 @@ func TestFindPackedGlyph_Empty(t *testing.T) {
 		t.Error("FindPackedGlyph on nil slice should not be found")
 	}
 }
+
+func TestRasterizeGlyph(t *testing.T) {
+	f := loadTestFont(t)
+	scale := float32(32) / float32(f.UnitsPerEm())
+	gid := f.GlyphID('H')
+	w, h, _, _ := GlyphBox(f, gid, scale)
+	var r ScanlineRasterizer
+	buf := make([]byte, w*h)
+	segs := RasterizeGlyph(&r, buf, w, f, gid, scale, nil)
+
+	// 'H' rests on the baseline, which is the bitmap's bottom edge: its stems fully cover the bottom row.
+	var bottom byte
+	for _, a := range buf[(h-1)*w:] {
+		bottom = max(bottom, a)
+	}
+	if bottom < 250 {
+		t.Errorf("bottom row coverage %d, want full", bottom)
+	}
+
+	// Drawn into a wider bitmap, the glyph's rows are the same.
+	const stride, x0 = 100, 7
+	wide := make([]byte, (h-1)*stride+x0+w)
+	RasterizeGlyph(&r, wide[x0:], stride, f, gid, scale, segs)
+	for y := range h {
+		if got, want := wide[x0+y*stride:][:w], buf[y*w:][:w]; string(got) != string(want) {
+			t.Fatalf("row %d differs with stride %d", y, stride)
+		}
+	}
+
+	// An empty glyph draws nothing.
+	space := f.GlyphID(' ')
+	if w, h, _, _ := GlyphBox(f, space, scale); w != 0 || h != 0 {
+		t.Fatalf("space has a %dx%d box", w, h)
+	}
+	RasterizeGlyph(&r, nil, 0, f, space, scale, segs)
+}

@@ -58,17 +58,11 @@ func TestScanlineRasterizer_GlyphA(t *testing.T) {
 	if w == 0 || h == 0 {
 		t.Fatal("GlyphBox returned 0 size for 'A'")
 	}
-	segs := f.GlyphOutline(nil, gid)
-	if len(segs) == 0 {
+	buf := make([]byte, w*h)
+	var r ScanlineRasterizer
+	if segs := RasterizeGlyph(&r, buf, w, f, gid, scale, nil); len(segs) == 0 {
 		t.Fatal("no outline segments for 'A'")
 	}
-
-	buf := make([]byte, w*h)
-	xMin, _, _, yMax := f.GlyphBounds(gid)
-	xoff := -float32(xMin) * scale
-	yoff := float32(yMax) * scale // flip Y: yMax in font units maps to y=0 in bitmap
-	var r ScanlineRasterizer
-	r.Rasterize(buf, w, h, w, segs, scale, xoff, yoff)
 
 	nonZero := 0
 	for _, b := range buf {

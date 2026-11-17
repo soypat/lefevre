@@ -44,32 +44,13 @@ func (cfg *PackConfig) BakeAtlas(rast Rasterizer, glyphs []uint16, atlas []byte,
 	if err := cfg.packInto(glyphs, atlasW, atlasH, placements); err != nil {
 		return err
 	}
-	var segBuf, flipBuf []lefevre.Segment
+	var segs []lefevre.Segment
 	for i, gID := range glyphs {
 		p := placements[i]
 		if p.W == 0 || p.H == 0 {
 			continue
 		}
-		segBuf = cfg.Font.GlyphOutline(segBuf[:0], gID)
-		if len(segBuf) == 0 {
-			continue
-		}
-		flipBuf = flipBuf[:0]
-		for _, s := range segBuf {
-			flipBuf = append(flipBuf, lefevre.Segment{
-				Op: s.Op,
-				X:  s.X, Y: -s.Y,
-				Cx: s.Cx, Cy: -s.Cy,
-			})
-		}
-		xMin, _, _, yMax := cfg.Font.GlyphBounds(gID)
-		// After Y-flip, map font point (fx, -fy) through rasterizer:
-		//   sx = fx*scale + xoff -> pixel fx*scale - xMin*scale
-		//   sy = -fy*scale + yoff -> pixel yMax*scale - fy*scale
-		xoff := -float32(xMin) * cfg.Scale
-		yoff := float32(yMax) * cfg.Scale
-		dst := atlas[p.Y*atlasW+p.X:]
-		rast.Rasterize(dst, p.W, p.H, atlasW, flipBuf, cfg.Scale, xoff, yoff)
+		segs = RasterizeGlyph(rast, atlas[p.Y*atlasW+p.X:], atlasW, cfg.Font, gID, cfg.Scale, segs)
 	}
 	return nil
 }

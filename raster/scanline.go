@@ -24,7 +24,7 @@ const (
 
 // Rasterize fills buf with 8-bit alpha coverage for the given outline segments.
 func (r *ScanlineRasterizer) Rasterize(buf []byte, width, height, stride int, segments []lefevre.Segment, scale, xoff, yoff float32) {
-	if width <= 0 || height <= 0 || len(buf) < stride*height {
+	if width <= 0 || height <= 0 || stride < width || len(buf) < (height-1)*stride+width {
 		return
 	}
 	// Clear target region.
